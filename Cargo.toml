@@ -1,0 +1,19 @@
+[package]
+name = "autoproto"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+static_assertions = "1.1"
+prost = "0.8"
+autoproto-derive = { path = "derive" }
+smallvec = { version = "1.6", optional = true }
+arrayvec = { version = "0.7", optional = true }
+
+[features]
+default = ["smallvec", "arrayvec"]
+
+[workspace]
+members = [
+    "derive"
+]
