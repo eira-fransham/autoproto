@@ -42,6 +42,12 @@ pub mod protostruct {
             .map(|(tag, field)| field.encoded_len_as_field(tag))
             .sum()
     }
+
+    pub fn is_default<T: ProtoStruct>(this: &T) -> bool {
+        this.fields()
+            .into_iter()
+            .all(|(_, field)| field.is_default())
+    }
 }
 
 pub mod default {
@@ -64,8 +70,10 @@ pub mod protooneof {
     use std::num::NonZeroU32;
 
     pub fn message_encode_raw<T: ProtoOneof, B: BufMut>(this: &T, buf: &mut B) {
-        let (tag, inner) = this.variant();
-        inner.encode_as_field(tag, buf)
+        if !this.is_default() {
+            let (tag, inner) = this.variant();
+            inner.encode_as_field(tag, buf)
+        }
     }
 
     pub fn message_merge_field<T: ProtoOneof, B: Buf>(

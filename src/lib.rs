@@ -1,10 +1,9 @@
 #![feature(const_generics, generic_associated_types)]
 
 pub use autoproto_derive::{Message, ProtoEncode};
-#[doc(hidden)]
-pub use prost;
 
-pub use prost::bytes::Bytes;
+pub use prost;
+pub use prost::bytes;
 
 pub mod generic;
 pub mod macros;
@@ -39,8 +38,17 @@ where
     }
 }
 
-// This is just so we can use `Cow`. The fact that you can't use the ref capabilities of `Cow`
-// without _also_ allowing conversion to an owned type is such an annoying limitation of `Cow`.
+impl<T> IsDefault for &'_ mut T
+where
+    T: IsDefault,
+{
+    fn is_default(&self) -> bool {
+        (**self).is_default()
+    }
+}
+
+// These two impls are just so we can use `Cow`. The fact that you can't use the ref capabilities of
+// `Cow` without _also_ allowing conversion to an owned type is such an annoying limitation of `Cow`.
 impl ToOwned for dyn Proto + '_ {
     type Owned = Box<Self>;
 
@@ -48,9 +56,6 @@ impl ToOwned for dyn Proto + '_ {
         panic!("Unable to create `Box<Self>`")
     }
 }
-
-// This is just so we can use `Cow`. The fact that you can't use the ref capabilities of `Cow`
-// without _also_ allowing conversion to an owned type is such an annoying limitation of `Cow`.
 impl ToOwned for dyn ProtoEncode + '_ {
     type Owned = Box<Self>;
 
@@ -80,6 +85,20 @@ impl<T> Proto for PhantomData<T> {
     }
 }
 
+impl<T> Proto for &'_ mut T
+where
+    T: Proto,
+{
+    fn merge_self(
+        &mut self,
+        wire_type: WireType,
+        buf: &mut dyn prost::bytes::Buf,
+        ctx: DecodeContext,
+    ) -> Result<(), prost::DecodeError> {
+        (**self).merge_self(wire_type, buf, ctx)
+    }
+}
+
 pub trait ProtoEncode: IsDefault {
     /// Encode this type _as a field_. This is different to encoding it as a message (which is
     /// what `prost::Message:encode_raw` does), as base types such as integers are encoded
@@ -91,6 +110,19 @@ pub trait ProtoEncode: IsDefault {
 }
 
 impl<T> ProtoEncode for &'_ T
+where
+    T: ProtoEncode,
+{
+    fn encode_as_field(&self, tag: NonZeroU32, buf: &mut dyn prost::bytes::BufMut) {
+        (**self).encode_as_field(tag, buf)
+    }
+
+    fn encoded_len_as_field(&self, tag: NonZeroU32) -> usize {
+        (**self).encoded_len_as_field(tag)
+    }
+}
+
+impl<T> ProtoEncode for &'_ mut T
 where
     T: ProtoEncode,
 {
@@ -238,7 +270,7 @@ where
 }
 
 /// Minimal set of methods needed to derive a `prost::Message` implementation for `T: ProtoStruct`.
-pub trait ProtoStruct {
+pub trait ProtoStruct: IsDefault {
     type Fields<'a>: IntoIterator<Item = (NonZeroU32, Cow<'a, dyn ProtoEncode>)> + 'a
     where
         Self: 'a;
@@ -257,7 +289,7 @@ pub trait ProtoScalar: Clone + Default + Proto + Sized {
         ScalarEncoding::new(ScalarEncodingKind::Varint(Some(Self::DEFAULT_VARINT)));
 
     fn from_value(other: Value) -> Option<Self>;
-    fn into_value(&self) -> Value;
+    fn to_value(&self) -> Value;
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]
@@ -483,7 +515,7 @@ where
     T: IsDefault + ProtoScalar,
 {
     fn is_default(&self) -> bool {
-        match (ENCODING.default, self.0.into_value()) {
+        match (ENCODING.default, self.0.to_value()) {
             (Some(default), Value::Int(inner)) => default == inner,
             _ => self.0.is_default(),
         }
@@ -495,34 +527,40 @@ where
     T: ProtoScalar,
 {
     fn encode_as_field(&self, tag: NonZeroU32, mut buf: &mut dyn prost::bytes::BufMut) {
-        match ENCODING.kind {
-            ScalarEncodingKind::Varint(varint) => {
-                prost::encoding::encode_key(tag.get(), WireType::Varint, &mut buf);
-                prost::encoding::encode_varint(
-                    varint
-                        .unwrap_or(T::DEFAULT_VARINT)
-                        .make_u64_varint(self.0.into_value()),
-                    &mut buf,
-                )
-            }
-            ScalarEncodingKind::Fixed(fixed) => {
-                let fixed = fixed.unwrap_or(T::DEFAULT_FIXED);
+        if !self.0.is_default() {
+            match ENCODING.kind {
+                ScalarEncodingKind::Varint(varint) => {
+                    prost::encoding::encode_key(tag.get(), WireType::Varint, &mut buf);
+                    prost::encoding::encode_varint(
+                        varint
+                            .unwrap_or(T::DEFAULT_VARINT)
+                            .make_u64_varint(self.0.to_value()),
+                        &mut buf,
+                    )
+                }
+                ScalarEncodingKind::Fixed(fixed) => {
+                    let fixed = fixed.unwrap_or(T::DEFAULT_FIXED);
 
-                prost::encoding::encode_key(tag.get(), fixed.into(), &mut buf);
+                    prost::encoding::encode_key(tag.get(), fixed.into(), &mut buf);
 
-                fixed.write(self.0.into_value(), buf)
+                    fixed.write(self.0.to_value(), buf)
+                }
             }
         }
     }
 
     fn encoded_len_as_field(&self, tag: NonZeroU32) -> usize {
-        match ENCODING.kind {
-            ScalarEncodingKind::Varint(varint) => varint
-                .unwrap_or(T::DEFAULT_VARINT)
-                .encoded_len(tag, self.0.into_value()),
-            ScalarEncodingKind::Fixed(fixed) => fixed
-                .unwrap_or(T::DEFAULT_FIXED)
-                .encoded_len(tag, self.0.into_value()),
+        if self.0.is_default() {
+            0
+        } else {
+            match ENCODING.kind {
+                ScalarEncodingKind::Varint(varint) => varint
+                    .unwrap_or(T::DEFAULT_VARINT)
+                    .encoded_len(tag, self.0.to_value()),
+                ScalarEncodingKind::Fixed(fixed) => fixed
+                    .unwrap_or(T::DEFAULT_FIXED)
+                    .encoded_len(tag, self.0.to_value()),
+            }
         }
     }
 }
@@ -546,20 +584,34 @@ where
                         .unwrap_or(T::DEFAULT_VARINT)
                         .parse_u64_varint(prost::encoding::decode_varint(&mut buf)?),
                 )
-                .ok_or(prost::DecodeError::new("Type mismatch"))?
+                .ok_or_else(|| prost::DecodeError::new("Type mismatch"))?
             }
             ScalarEncodingKind::Fixed(fixed) => {
                 let fixed = fixed.unwrap_or(T::DEFAULT_FIXED);
                 prost::encoding::check_wire_type(fixed.into(), wire_type)?;
 
                 T::from_value(fixed.read(&mut buf))
-                    .ok_or(prost::DecodeError::new("Type mismatch"))?
+                    .ok_or_else(|| prost::DecodeError::new("Type mismatch"))?
             }
         };
 
         Ok(())
     }
 }
+
+macro_rules! impl_is_default {
+    ($($t:ty),*) => {
+        $(
+            impl $crate::IsDefault for $t {
+                fn is_default(&self) -> bool {
+                    $crate::generic::default::is_default(self)
+                }
+            }
+        )*
+    };
+}
+
+impl_is_default!(u8, u16, u32, u64, i8, i16, i32, i64, usize, isize, f32, f64);
 
 impl_protoscalar!(u8, Fixed::Fixed32, Varint::U32);
 impl_protoscalar!(u16, Fixed::Fixed32, Varint::U32);

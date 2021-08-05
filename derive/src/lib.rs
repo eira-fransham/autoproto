@@ -3,7 +3,7 @@ extern crate proc_macro;
 use anyhow::{anyhow, bail, Error};
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
-use quote::quote;
+use quote::{quote, ToTokens};
 use std::{iter, num::NonZeroU32};
 use syn::{
     punctuated::Punctuated, Arm, Attribute, Data, DataEnum, DataStruct, DeriveInput, Expr,
@@ -11,6 +11,8 @@ use syn::{
     Lifetime, LifetimeDef, Lit, LitInt, Member, Meta, MetaList, NestedMeta, Token, Type,
     TypeReference, WhereClause, WherePredicate,
 };
+
+mod newtype;
 
 type Result<T> = std::result::Result<T, Error>;
 
@@ -50,6 +52,69 @@ fn try_derive_protoencode(input: TokenStream) -> Result<TokenStream2> {
         data,
     } = &input;
 
+    let attrs = MessageAttributes::new(attrs)?;
+
+    if attrs.transparent {
+        let inner_field = match data {
+            Data::Struct(DataStruct {
+                fields: Fields::Named(FieldsNamed { named: fields, .. }),
+                ..
+            })
+            | Data::Struct(DataStruct {
+                fields:
+                    Fields::Unnamed(FieldsUnnamed {
+                        unnamed: fields, ..
+                    }),
+                ..
+            }) => {
+                if fields.len() != 1 {
+                    bail!("`transparent` message must have exactly one field");
+                }
+
+                fields.first().ok_or_else(|| anyhow!("Programmer error"))?
+            }
+            Data::Struct(DataStruct {
+                fields: Fields::Unit,
+                ..
+            }) => {
+                bail!("Cannot have a `transparent` message without fields");
+            }
+            _ => {
+                bail!("Invalid type for a `transparent` message");
+            }
+        };
+
+        let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+        let field: Member = inner_field
+            .ident
+            .clone()
+            .map(Member::Named)
+            .unwrap_or_else(|| Member::Unnamed(0.into()));
+
+        let make_where_clause = make_where_clause_fn(generics, where_clause);
+        let (protoencode_impl, is_default_impl) = (
+            newtype::protoencode(
+                ident,
+                &field,
+                &impl_generics,
+                &ty_generics,
+                &make_where_clause,
+            ),
+            newtype::is_default(
+                ident,
+                &field,
+                &impl_generics,
+                &ty_generics,
+                &make_where_clause,
+            ),
+        );
+
+        return Ok(quote! {
+            #protoencode_impl
+            #is_default_impl
+        });
+    }
+
     match data {
         Data::Struct(DataStruct {
             fields: Fields::Named(FieldsNamed { named: fields, .. }),
@@ -70,7 +135,7 @@ fn try_derive_protoencode(input: TokenStream) -> Result<TokenStream2> {
             )?;
 
             let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
-            let make_where_clause = make_where_clause_fn(&generics, where_clause);
+            let make_where_clause = make_where_clause_fn(generics, where_clause);
 
             let is_default_where_clause =
                 make_where_clause(quote!(::autoproto::IsDefault + ::autoproto::ProtoEncode));
@@ -97,12 +162,11 @@ fn try_derive_protoencode(input: TokenStream) -> Result<TokenStream2> {
                 #protoencode_impl
             ))
         }
-        Data::Enum(data) => try_derive_enum(&attrs, &ident, generics, data),
         Data::Union(..) => {
             bail!("Message can not be derived for an untagged union (try using `enum`)")
         }
         _ => {
-            bail!("Unsupported type for `derive(ProtoEncode)`")
+            bail!("Currently unsupported type for `derive(ProtoEncode)`")
         }
     }
 }
@@ -118,8 +182,8 @@ fn try_derive_message(input: TokenStream) -> Result<TokenStream2> {
     } = &input;
 
     match data {
-        Data::Struct(data) => try_derive_struct(&attrs, &ident, generics, data),
-        Data::Enum(data) => try_derive_oneof(&attrs, &ident, generics, data),
+        Data::Struct(data) => try_derive_struct(attrs, ident, generics, data),
+        Data::Enum(data) => try_derive_oneof(attrs, ident, generics, data),
         Data::Union(..) => {
             bail!("Message can not be derived for an untagged union (try using `enum`)")
         }
@@ -137,8 +201,8 @@ fn try_derive_proto(input: TokenStream) -> Result<TokenStream2> {
     } = &input;
 
     match data {
-        Data::Struct(data) => try_derive_proto_newtype(&attrs, &ident, generics, data),
-        Data::Enum(data) => try_derive_enum(&attrs, &ident, generics, data),
+        Data::Struct(_data) => todo!(),
+        Data::Enum(data) => try_derive_enum(attrs, ident, generics, data),
         Data::Union(..) => {
             bail!("Message can not be derived for an untagged union (try using `enum`)")
         }
@@ -146,20 +210,231 @@ fn try_derive_proto(input: TokenStream) -> Result<TokenStream2> {
 }
 
 fn try_derive_enum(
-    attrs: &[Attribute],
-    ident: &Ident,
-    generics: &Generics,
-    data: &DataEnum,
+    _attrs: &[Attribute],
+    _ident: &Ident,
+    _generics: &Generics,
+    _data: &DataEnum,
 ) -> Result<TokenStream2> {
     todo!()
 }
 
 fn try_derive_oneof(
-    attrs: &[Attribute],
+    _attrs: &[Attribute],
     ident: &Ident,
     generics: &Generics,
     data: &DataEnum,
 ) -> Result<TokenStream2> {
+    fn make_variant_get_field_arm_with_fields<F, T, FIter>(
+        ident: &Ident,
+        tag: Lit,
+        generics: &Generics,
+        mut brackets: F,
+        semicolon: Option<Token!(;)>,
+        dummy_field: Option<(Ident, Token!(:))>,
+        fields: &FIter,
+    ) -> Arm
+    where
+        F: FnMut(TokenStream2) -> T,
+        T: ToTokens,
+        for<'a> &'a FIter: IntoIterator<Item = &'a Field>,
+    {
+        let names = fields
+            .into_iter()
+            .enumerate()
+            .map(|(i, field)| {
+                field
+                    .ident
+                    .clone()
+                    .unwrap_or_else(|| Ident::new(&format!("__field_{}", i), Span::call_site()))
+            })
+            .collect::<Punctuated<_, Token!(,)>>();
+
+        let lifetime = Lifetime {
+            apostrophe: Span::call_site(),
+            ident: Ident::new("__dummy_lifetime", Span::call_site()),
+        };
+
+        let (_, ty_generics, _) = generics.split_for_impl();
+
+        let dummy_generics = Generics {
+            params: generics
+                .params
+                .iter()
+                .cloned()
+                .chain(iter::once(GenericParam::Lifetime(LifetimeDef {
+                    attrs: vec![],
+                    lifetime: lifetime.clone(),
+                    colon_token: None,
+                    bounds: Default::default(),
+                })))
+                .collect(),
+            ..generics.clone()
+        };
+
+        let dummy_fields: Punctuated<_, Token!(,)> = fields
+            .into_iter()
+            .cloned()
+            .map(|field| {
+                let Field {
+                    attrs,
+                    vis,
+                    ident,
+                    colon_token,
+                    ty,
+                } = field;
+
+                let ty = Type::Reference(TypeReference {
+                    and_token: Default::default(),
+                    lifetime: Some(lifetime.clone()),
+                    mutability: None,
+                    elem: Box::new(ty),
+                });
+
+                Field {
+                    attrs,
+                    vis,
+                    ident,
+                    colon_token,
+                    ty,
+                }
+            })
+            .collect();
+
+        let phantom_lifetimes: Vec<Lifetime> = generics
+            .params
+            .iter()
+            .filter_map(|g| match g {
+                GenericParam::Lifetime(l) => Some(l.lifetime.clone()),
+                _ => None,
+            })
+            .collect();
+        let phantom_types: Punctuated<Ident, Token!(,)> = generics
+            .params
+            .iter()
+            .filter_map(|g| match g {
+                GenericParam::Type(t) => Some(t.ident.clone()),
+                _ => None,
+            })
+            .collect();
+
+        let mut phantom_inner_type: Type = syn::parse_quote!((#phantom_types));
+        for lifetime in phantom_lifetimes {
+            phantom_inner_type = syn::parse_quote!(& #lifetime #phantom_inner_type);
+        }
+
+        let dummy_field = dummy_field.map(|(name, tok)| quote!(#name #tok));
+        let struct_body = brackets(quote!(
+            #dummy_fields,
+            #dummy_field ::core::marker::PhantomData<#phantom_inner_type>,
+        ));
+        let struct_construct = brackets(quote!(
+            #names,
+            #dummy_field ::core::marker::PhantomData,
+        ));
+        let variant_bindings = brackets(quote!(#names));
+
+        let out = syn::parse_quote!(
+            Self::#ident #variant_bindings => {
+                #[derive(Debug, ::autoproto::ProtoEncode)]
+                struct #ident #dummy_generics #struct_body #semicolon
+
+                (
+                    ::core::num::NonZeroU32::new(#tag).unwrap(),
+                    ::std::borrow::Cow::Owned(
+                        ::std::boxed::Box::new(
+                            #ident :: #ty_generics #struct_construct
+                        ) as ::std::boxed::Box<dyn ::autoproto::ProtoEncode>
+                    ),
+                )
+            }
+        );
+
+        eprintln!("{}", quote!(#out));
+
+        out
+    }
+
+    fn make_unit_variant_get_field_arm<T: ToTokens>(ident: &Ident, tag: Lit, brackets: T) -> Arm {
+        syn::parse_quote!(
+            Self::#ident #brackets => (
+                ::core::num::NonZeroU32::new(#tag).unwrap(),
+                ::std::borrow::Cow::Borrowed(&()),
+            )
+        )
+    }
+
+    fn make_newtype_variant_get_field_arm<F, T>(
+        ident: &Ident,
+        tag: Lit,
+        field_name: Ident,
+        brackets: F,
+    ) -> Arm
+    where
+        F: FnOnce(TokenStream2) -> T,
+        T: ToTokens,
+    {
+        let field_name_pat = brackets(quote!(#field_name));
+
+        syn::parse_quote!(
+            Self::#ident #field_name_pat => (
+                ::core::num::NonZeroU32::new(#tag).unwrap(),
+                ::std::borrow::Cow::Borrowed(#field_name),
+            )
+        )
+    }
+
+    fn make_variant_get_field_arm(
+        ident: &Ident,
+        tag: Lit,
+        generics: &Generics,
+        fields: &Fields,
+    ) -> Arm {
+        let phantom_name = Ident::new("__proto_dummy_marker", Span::call_site());
+
+        match &fields {
+            Fields::Named(FieldsNamed { named: fields, .. }) => match fields.len() {
+                0 => make_unit_variant_get_field_arm(ident, tag, quote!({})),
+                1 => {
+                    let field_name = fields
+                        .first()
+                        .and_then(|field| field.ident.clone())
+                        .expect("Programmer error: names array should have one named element");
+
+                    make_newtype_variant_get_field_arm(ident, tag, field_name, |f| quote!( { #f } ))
+                }
+                _ => make_variant_get_field_arm_with_fields(
+                    ident,
+                    tag,
+                    generics,
+                    |val| quote!( { #val } ),
+                    None,
+                    Some((phantom_name, Default::default())),
+                    fields,
+                ),
+            },
+            Fields::Unnamed(FieldsUnnamed {
+                unnamed: fields, ..
+            }) => match fields.len() {
+                0 => make_unit_variant_get_field_arm(ident, tag, quote!(())),
+                1 => {
+                    let field_name = Ident::new("__proto_enum_inner", Span::call_site());
+
+                    make_newtype_variant_get_field_arm(ident, tag, field_name, |f| quote!( ( #f ) ))
+                }
+                _ => make_variant_get_field_arm_with_fields(
+                    ident,
+                    tag,
+                    generics,
+                    |val| quote!( ( #val ) ),
+                    Some(Default::default()),
+                    None,
+                    fields,
+                ),
+            },
+            Fields::Unit => make_unit_variant_get_field_arm(ident, tag, quote!()),
+        }
+    }
+
     let variants = data
         .variants
         .iter()
@@ -170,7 +445,7 @@ fn try_derive_oneof(
             Ok((
                 attributes
                     .tag
-                    .unwrap_or(NonZeroU32::new(i as u32 + 1).unwrap()),
+                    .unwrap_or_else(|| NonZeroU32::new(i as u32 + 1).unwrap()),
                 variant,
             ))
         })
@@ -181,270 +456,13 @@ fn try_derive_oneof(
     let variant_get_field: Vec<Arm> = variants
         .iter()
         .map::<Arm, _>(|(tag, variant)| {
-            let ident = &variant.ident;
-            let tag: Lit =
-                LitInt::new(&tag.get().to_string(), Span::call_site()).into();
+            let tag: Lit = LitInt::new(&tag.get().to_string(), Span::call_site()).into();
 
-            match &variant.fields {
-                Fields::Named(FieldsNamed { named: fields, .. }) => {
-                    let names = fields
-                        .iter()
-                        .map(|field| {
-                            field
-                                .ident
-                                .as_ref()
-                                .expect("Programmer error: \"named\" field with no name")
-                        })
-                        .collect::<Punctuated<_, Token!(,)>>();
-
-                    match fields.len() {
-                        0 => {
-                            syn::parse_quote!(
-                                Self::#ident { } => (
-                                    ::core::num::NonZeroU32::new(#tag).unwrap(),
-                                    ::std::borrow::Cow::Borrowed(&()),
-                                )
-                            )
-                        }
-                        1 => {
-                            let field_name = names
-                                .first()
-                                .expect("Programmer error: names array should have one element");
-
-                            syn::parse_quote!(
-                                Self::#ident { #field_name } => (
-                                    ::core::num::NonZeroU32::new(#tag).unwrap(),
-                                    ::std::borrow::Cow::Borrowed(#field_name),
-                                )
-                            )
-                        }
-                        _ => {
-                            let lifetime = Lifetime {
-                                apostrophe: Span::call_site(),
-                                ident: Ident::new("__dummy_lifetime", Span::call_site()),
-                            };
-                            let dummy_generics = Generics {
-                                params: generics
-                                    .params
-                                    .iter()
-                                    .cloned()
-                                    .chain(iter::once(GenericParam::Lifetime(LifetimeDef {
-                                        attrs: vec![],
-                                        lifetime: lifetime.clone(),
-                                        colon_token: None,
-                                        bounds: Default::default(),
-                                    })))
-                                    .collect(),
-                                ..generics.clone()
-                            };
-
-                            let dummy_fields: Punctuated<_, Token!(,)> = fields
-                                .iter()
-                                .cloned()
-                                .map(|field| {
-                                    let Field {
-                                        attrs,
-                                        vis,
-                                        ident,
-                                        colon_token,
-                                        ty,
-                                    } = field;
-
-                                    let ty = Type::Reference(TypeReference {
-                                        and_token: Default::default(),
-                                        lifetime: Some(lifetime.clone()),
-                                        mutability: None,
-                                        elem: Box::new(ty),
-                                    });
-
-                                    Field {
-                                        attrs,
-                                        vis,
-                                        ident,
-                                        colon_token,
-                                        ty,
-                                    }
-                                })
-                                .collect();
-
-                            let phantom_lifetimes: Vec<Lifetime> = generics.params.iter().filter_map(|g| match g {
-                                GenericParam::Lifetime(l) => Some(l.lifetime.clone()),
-                                _ => None,
-                            }).collect();
-                            let phantom_types: Punctuated<Ident, Token!(,)> = generics.params.iter().filter_map(|g| match g {
-                                GenericParam::Type(t) => Some(t.ident.clone()),
-                                _ => None,
-                            }).collect();
-
-                            let mut phantom_inner_type: Type = syn::parse_quote!((#phantom_types));
-                            for lifetime in phantom_lifetimes {
-                                phantom_inner_type = syn::parse_quote!(& #lifetime phantom_inner_type);
-                            }
-
-                            let phantom_name = Ident::new("__proto_dummy_marker", Span::call_site());
-
-                            // TODO: Extract this to function so we don't need to duplicate this
-                            //       code both here and for unnamed fields.
-                            syn::parse_quote!(
-                                Self::#ident { #names } => {
-                                    #[derive(Debug, ::autoproto::ProtoEncode)]
-                                    struct #ident #dummy_generics {
-                                        #dummy_fields,
-                                        #phantom_name: ::core::marker::PhantomData<#phantom_inner_type>,
-                                    }
-
-                                    (
-                                        ::core::num::NonZeroU32::new(#tag).unwrap(),
-                                        ::std::borrow::Cow::Owned(
-                                            ::std::boxed::Box::new(
-                                                #ident :: #ty_generics {
-                                                    #names,
-                                                    #phantom_name: ::core::marker::PhantomData,
-                                                }
-                                            ) as ::std::boxed::Box<dyn ::autoproto::ProtoEncode>
-                                        ),
-                                    )
-                                }
-                            )
-                        }
-                    }
-                }
-                Fields::Unnamed(FieldsUnnamed {
-                    unnamed: fields, ..
-                }) => {
-                    let names = (0..fields.len())
-                        .map(|i| {
-                            Ident::new(&format!("__field_{}", i), Span::call_site())
-                        })
-                        .collect::<Punctuated<_, Token!(,)>>();
-
-                    match fields.len() {
-                        0 => {
-                            syn::parse_quote!(
-                                Self::#ident ( ) => (
-                                    ::core::num::NonZeroU32::new(#tag).unwrap(),
-                                    ::std::borrow::Cow::Borrowed(&()),
-                                )
-                            )
-                        }
-                        1 => {
-                            let field_name = names
-                                .first()
-                                .expect("Programmer error: names array should have one element");
-
-                            syn::parse_quote!(
-                                Self::#ident ( #field_name ) => (
-                                    ::core::num::NonZeroU32::new(#tag).unwrap(),
-                                    ::std::borrow::Cow::Borrowed(#field_name),
-                                )
-                            )
-                        }
-                        _ => {
-                            let lifetime = Lifetime {
-                                apostrophe: Span::call_site(),
-                                ident: Ident::new("__dummy_lifetime", Span::call_site()),
-                            };
-                            let dummy_generics = Generics {
-                                params: iter::once(
-                                    LifetimeDef {
-                                        attrs: vec![],
-                                        lifetime: lifetime.clone(),
-                                        colon_token: None,
-                                        bounds: Default::default(),
-                                    }.into()
-                                )
-                                    .chain(
-                                        generics
-                                            .params
-                                            .iter()
-                                            .cloned()
-                                    )
-                                    .collect(),
-                                ..generics.clone()
-                            };
-
-                            let dummy_fields: Punctuated<_, Token!(,)> = fields
-                                .iter()
-                                .cloned()
-                                .map(|field| {
-                                    let Field {
-                                        attrs,
-                                        vis,
-                                        ident,
-                                        colon_token,
-                                        ty,
-                                    } = field;
-
-                                    let ty = Type::Reference(TypeReference {
-                                        and_token: Default::default(),
-                                        lifetime: Some(lifetime.clone()),
-                                        mutability: None,
-                                        elem: Box::new(ty),
-                                    });
-
-                                    Field {
-                                        attrs,
-                                        vis,
-                                        ident,
-                                        colon_token,
-                                        ty,
-                                    }
-                                })
-                                .collect();
-
-                            let phantom_lifetimes: Vec<Lifetime> = generics.params.iter().filter_map(|g| match g {
-                                GenericParam::Lifetime(l) => Some(l.lifetime.clone()),
-                                _ => None,
-                            }).collect();
-                            let phantom_types: Punctuated<Ident, Token!(,)> = generics.params.iter().filter_map(|g| match g {
-                                GenericParam::Type(t) => Some(t.ident.clone()),
-                                _ => None,
-                            }).collect();
-
-                            let mut phantom_inner_type: Type = syn::parse_quote!((#phantom_types));
-                            for lifetime in phantom_lifetimes {
-                                phantom_inner_type = syn::parse_quote!(& #lifetime phantom_inner_type);
-                            }
-
-                            // TODO: Extract this to function so we don't need to duplicate this
-                            //       code both here and for named fields.
-                            syn::parse_quote!(
-                                Self::#ident ( #names ) => {
-                                    #[derive(::autoproto::Message)]
-                                    struct #ident #dummy_generics(
-                                        #dummy_fields,
-                                        ::core::marker::PhantomData<#phantom_inner_type>,
-                                    );
-
-                                    (
-                                        ::core::num::NonZeroU32::new(#tag).unwrap(),
-                                        ::std::borrow::Cow::Owned(
-                                            ::std::boxed::Box::new(
-                                                #ident :: #ty_generics(
-                                                    #names,
-                                                    ::core::marker::PhantomData,
-                                                )
-                                            ) as ::std::boxed::Box<dyn ::autoproto::ProtoEncode>
-                                        ),
-                                    )
-                                }
-                            )
-                        }
-                    }
-                },
-                Fields::Unit => {
-                    syn::parse_quote!(
-                        Self::#ident => (
-                            ::core::num::NonZeroU32::new(#tag).unwrap(),
-                            ::std::borrow::Cow::Borrowed(&()),
-                        )
-                    )
-                }
-            }
+            make_variant_get_field_arm(&variant.ident, tag, generics, &variant.fields)
         })
         .collect();
 
-    let make_where_clause = make_where_clause_fn(&generics, where_clause);
+    let make_where_clause = make_where_clause_fn(generics, where_clause);
 
     let protooneof_where_clause = make_where_clause(quote!(::autoproto::Proto));
 
@@ -455,6 +473,23 @@ fn try_derive_oneof(
         brace_token: Default::default(),
         arms: variant_get_field,
     };
+
+    let message_where_clause = make_where_clause(quote!(
+        ::core::default::Default
+            + ::autoproto::Proto
+            + ::core::fmt::Debug
+            + ::core::marker::Send
+            + ::core::marker::Sync
+    ));
+    let message_impl = impl_message_for_protooneof(
+        ident,
+        &impl_generics,
+        &ty_generics,
+        Some(&message_where_clause),
+    );
+
+    let proto_impl =
+        impl_proto_for_message(ident, &impl_generics, &ty_generics, &make_where_clause);
 
     Ok(quote!(
         impl #impl_generics ::autoproto::ProtoOneof for #ident #ty_generics #protooneof_where_clause {
@@ -469,6 +504,10 @@ fn try_derive_oneof(
                 todo!()
             }
         }
+
+        #message_impl
+
+        #proto_impl
     ))
 }
 
@@ -486,9 +525,8 @@ fn make_where_clause_fn(
         .map(|t| t.ident.clone())
         .collect::<Vec<_>>();
     let where_clause = where_clause
-        .clone()
         .map(WhereClause::clone)
-        .unwrap_or(WhereClause {
+        .unwrap_or_else(|| WhereClause {
             where_token: Default::default(),
             predicates: Punctuated::new(),
         });
@@ -506,23 +544,6 @@ fn make_where_clause_fn(
     }
 }
 
-fn try_derive_proto_newtype(
-    attrs: &[Attribute],
-    ident: &Ident,
-    generics: &Generics,
-    data: &DataStruct,
-) -> Result<TokenStream2> {
-    let attrs = MessageAttributes::new(attrs)?;
-
-    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
-
-    if !attrs.transparent {
-        bail!("Cannot derive `Proto` for a non-newtype (try deriving `Message`, which will automatically implement `Proto` for this type too");
-    }
-
-    todo!()
-}
-
 fn try_derive_protostruct<'a>(
     fields: impl ExactSizeIterator<Item = &'a Field>,
     ident: &Ident,
@@ -533,10 +554,7 @@ fn try_derive_protostruct<'a>(
 
     let num_fields = fields.len();
 
-    let make_where_clause = make_where_clause_fn(&generics, where_clause);
-
-    let protostruct_where_clause = make_where_clause(quote!(::autoproto::ProtoEncode));
-    let protostructmut_where_clause = make_where_clause(quote!(::autoproto::Proto));
+    let make_where_clause = make_where_clause_fn(generics, where_clause);
 
     let fields: Result<Vec<(NonZeroU32, Member)>> = fields
         .enumerate()
@@ -546,12 +564,12 @@ fn try_derive_protostruct<'a>(
             Ok((
                 attributes
                     .tag
-                    .unwrap_or(NonZeroU32::new(i as u32 + 1).unwrap()),
+                    .unwrap_or_else(|| NonZeroU32::new(i as u32 + 1).unwrap()),
                 field
                     .ident
                     .clone()
                     .map(Member::Named)
-                    .unwrap_or(Member::Unnamed(i.into())),
+                    .unwrap_or_else(|| Member::Unnamed(i.into())),
             ))
         })
         .collect();
@@ -585,6 +603,9 @@ fn try_derive_protostruct<'a>(
         })
         .chain(iter::once(syn::parse_quote!({ None })))
         .collect();
+
+    let protostruct_where_clause = make_where_clause(quote!(::autoproto::ProtoEncode));
+    let protostructmut_where_clause = make_where_clause(quote!(::autoproto::Proto));
 
     let immut: ItemImpl = syn::parse_quote! {
         impl #impl_generics ::autoproto::ProtoStruct for #ident #ty_generics #protostruct_where_clause {
@@ -626,7 +647,7 @@ fn try_derive_struct(
 
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
-    let make_where_clause = make_where_clause_fn(&generics, where_clause);
+    let make_where_clause = make_where_clause_fn(generics, where_clause);
 
     if attrs.transparent {
         let inner_field = match data {
@@ -641,17 +662,17 @@ fn try_derive_struct(
                     }),
                 ..
             } => {
-                if fields.len() > 1 {
-                    bail!("Cannot have a \"transparent\" message with more than one field");
+                if fields.len() != 1 {
+                    bail!("`transparent` message must have exactly one field");
                 }
 
-                fields.first().ok_or(anyhow!("Programmer error"))?
+                fields.first().ok_or_else(|| anyhow!("Programmer error"))?
             }
             DataStruct {
                 fields: Fields::Unit,
                 ..
             } => {
-                bail!("Cannot have a \"transparent\" message without fields");
+                bail!("Cannot have a `transparent` message without fields");
             }
         };
 
@@ -659,69 +680,45 @@ fn try_derive_struct(
             .ident
             .clone()
             .map(Member::Named)
-            .unwrap_or(Member::Unnamed(0.into()));
+            .unwrap_or_else(|| Member::Unnamed(0.into()));
 
-        let is_default_where_clause = make_where_clause(quote!(::autoproto::IsDefault));
-        let proto_where_clause = make_where_clause(quote!(::autoproto::Proto));
-        let protoencode_where_clause = make_where_clause(quote!(::autoproto::ProtoEncode));
-        let message_where_clause = make_where_clause(quote!(::autoproto::prost::Message));
+        let (protoencode_impl, proto_impl, message_impl, is_default_impl) = (
+            newtype::protoencode(
+                ident,
+                &field,
+                &impl_generics,
+                &ty_generics,
+                &make_where_clause,
+            ),
+            newtype::proto(
+                ident,
+                &field,
+                &impl_generics,
+                &ty_generics,
+                &make_where_clause,
+            ),
+            newtype::message(
+                ident,
+                &field,
+                &impl_generics,
+                &ty_generics,
+                &make_where_clause,
+            ),
+            newtype::is_default(
+                ident,
+                &field,
+                &impl_generics,
+                &ty_generics,
+                &make_where_clause,
+            ),
+        );
 
         return Ok(quote! {
-            impl #impl_generics ::autoproto::IsDefault for #ident #ty_generics #is_default_where_clause {
-                fn is_default(&self) -> bool {
-                    ::autoproto::IsDefault::is_default(&self.#field)
-                }
-            }
-
-            impl #impl_generics ::autoproto::ProtoEncode for #ident #ty_generics #protoencode_where_clause {
-                fn encode_as_field(&self, tag: ::core::num::NonZeroU32, buf: &mut dyn prost::bytes::BufMut) {
-                    ::autoproto::ProtoEncode::encode_as_field(&self.#field, tag, buf)
-                }
-
-                fn encoded_len_as_field(&self, tag: ::core::num::NonZeroU32) -> usize {
-                    ::autoproto::ProtoEncode::encoded_len_as_field(&self.#field, tag)
-                }
-            }
-
-            impl #impl_generics ::autoproto::Proto for #ident #ty_generics #proto_where_clause {
-                fn merge_self(
-                    &mut self,
-                    wire_type: ::autoproto::prost::encoding::WireType,
-                    buf: &mut dyn prost::bytes::Buf,
-                    ctx: ::autoproto::prost::encoding::DecodeContext,
-                ) -> Result<(), ::autoproto::prost::DecodeError> {
-                    ::autoproto::Proto::merge_self(&mut self.#field, wire_type, buf, ctx)
-                }
-            }
-
-            impl #impl_generics ::autoproto::prost::Message for #ident #ty_generics #message_where_clause {
-                fn encode_raw<__Buffer>(&self, buf: &mut __Buffer)
-                where
-                    __Buffer: prost::bytes::BufMut,
-                {
-                    ::autoproto::prost::Message::encode_raw(&self.#field, buf)
-                }
-
-                fn merge_field<__Buffer: prost::bytes::Buf>(
-                    &mut self,
-                    tag: u32,
-                    wire_type: ::autoproto::prost::encoding::WireType,
-                    buf: &mut __Buffer,
-                    ctx: ::autoproto::prost::encoding::DecodeContext,
-                ) -> Result<(), ::autoproto::prost::DecodeError> {
-                    ::autoproto::prost::Message::merge_field(&mut self.#field, tag, wire_type, buf, ctx)
-                }
-
-                fn encoded_len(&self) -> usize {
-                    ::autoproto::prost::Message::encoded_len(&self.#field)
-                }
-
-                fn clear(&mut self) {
-                    ::autoproto::prost::Message::clear(&mut self.#field)
-                }
-            }
-        }
-        .into());
+            #protoencode_impl
+            #proto_impl
+            #message_impl
+            #is_default_impl
+        });
     }
 
     match data {
@@ -897,24 +894,7 @@ fn impl_is_default_for_protostruct(
     syn::parse_quote!(
         impl #impl_generics ::autoproto::IsDefault for #ident #ty_generics #where_clause {
             fn is_default(&self) -> bool {
-                ::autoproto::ProtoStruct::fields(self)
-                    .into_iter()
-                    .all(|(_, field)| field.is_default())
-            }
-        }
-    )
-}
-
-fn impl_is_default_for_protooneof(
-    ident: &Ident,
-    impl_generics: &syn::ImplGenerics,
-    ty_generics: &syn::TypeGenerics,
-    where_clause: Option<&syn::WhereClause>,
-) -> ItemImpl {
-    syn::parse_quote!(
-        impl #impl_generics ::autoproto::IsDefault for #ident #ty_generics #where_clause {
-            fn is_default(&self) -> bool {
-                ::autoproto::generic::default::message_clear(self)
+                ::autoproto::generic::protostruct::is_default(self)
             }
         }
     )
@@ -1048,6 +1028,7 @@ fn unit_proto_impl(
     )
 }
 
+#[derive(Debug)]
 struct FieldAttributes {
     tag: Option<NonZeroU32>,
 }
@@ -1056,27 +1037,31 @@ impl FieldAttributes {
     fn new(attrs: &[Attribute]) -> Result<Self> {
         let mut tag = None::<NonZeroU32>;
 
-        for attr in attrs {
-            match attr.parse_meta()? {
-                Meta::NameValue(inner) => {
-                    let ident = if let Some(ident) = inner.path.get_ident() {
-                        ident
-                    } else {
-                        continue;
-                    };
+        for meta in attrs
+            .iter()
+            .filter_map(|attr| match attr.parse_meta().ok()? {
+                Meta::List(MetaList { nested: inner, .. }) => Some(inner),
+                _ => None,
+            })
+            .flatten()
+        {
+            if let NestedMeta::Meta(Meta::NameValue(inner)) = meta {
+                let ident = if let Some(ident) = inner.path.get_ident() {
+                    ident
+                } else {
+                    continue;
+                };
 
-                    if ident == "tag" {
-                        tag = Some(
-                            NonZeroU32::new(match inner.lit {
-                                Lit::Str(lit) => lit.value().parse()?,
-                                Lit::Int(lit) => lit.base10_parse()?,
-                                _ => bail!("Unknown tag type"),
-                            })
-                            .ok_or_else(|| anyhow!("Tag cannot be zero"))?,
-                        );
-                    }
+                if ident == "tag" {
+                    tag = Some(
+                        NonZeroU32::new(match inner.lit {
+                            Lit::Str(lit) => lit.value().parse()?,
+                            Lit::Int(lit) => lit.base10_parse()?,
+                            _ => bail!("Unknown tag type"),
+                        })
+                        .ok_or_else(|| anyhow!("Tag cannot be zero"))?,
+                    );
                 }
-                _ => {}
             }
         }
 
@@ -1084,6 +1069,7 @@ impl FieldAttributes {
     }
 }
 
+#[derive(Debug)]
 struct MessageAttributes {
     transparent: bool,
 }
@@ -1100,30 +1086,19 @@ impl MessageAttributes {
             })
             .flatten()
         {
-            match meta {
-                NestedMeta::Meta(Meta::Path(inner)) => {
-                    let ident = if let Some(ident) = inner.get_ident() {
-                        ident
-                    } else {
-                        continue;
-                    };
+            if let NestedMeta::Meta(Meta::Path(inner)) = meta {
+                let ident = if let Some(ident) = inner.get_ident() {
+                    ident
+                } else {
+                    continue;
+                };
 
-                    if ident == "transparent" {
-                        transparent = true;
-                    }
+                if ident == "transparent" {
+                    transparent = true;
                 }
-                _ => {}
             }
         }
 
         Ok(Self { transparent })
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn it_works() {
-        assert_eq!(2 + 2, 4);
     }
 }

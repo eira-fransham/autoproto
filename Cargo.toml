@@ -5,13 +5,19 @@ edition = "2018"
 
 [dependencies]
 static_assertions = "1.1"
-prost = "0.8"
+prost = { version = "0.8", default-features = false }
 autoproto-derive = { path = "derive" }
 smallvec = { version = "1.6", optional = true }
 arrayvec = { version = "0.7", optional = true }
 
 [features]
 default = ["smallvec", "arrayvec"]
+
+[dev-dependencies]
+static_assertions = "1.1"
+prost = { version = "0.8", default-features = true }
+quickcheck = "1.0"
+quickcheck_macros = "1.0"
 
 [workspace]
 members = [

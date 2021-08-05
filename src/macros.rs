@@ -25,7 +25,6 @@ macro_rules! impl_proto_for_message {
                 mut buf: &mut dyn $crate::prost::bytes::Buf,
                 ctx: $crate::prost::encoding::DecodeContext,
             ) -> Result<(), $crate::prost::DecodeError> {
-                // `skip_field` doesn't use the tag for proto3 values, only for groups in proto2.
                 $crate::prost::encoding::message::merge(wire_type, self, &mut buf, ctx)
             }
         }
@@ -51,6 +50,7 @@ macro_rules! impl_protoscalar {
     };
 
     ($t:ty, ($from_value:expr, $into_value:expr), $default_fixed:path, $default_varint:path $(, $default_encoding:expr)?) => {
+        #[allow(clippy::all)]
         impl $crate::ProtoScalar for $t {
             const DEFAULT_FIXED: Fixed = $default_fixed;
             const DEFAULT_VARINT: Varint = $default_varint;
@@ -60,11 +60,12 @@ macro_rules! impl_protoscalar {
                 ($from_value)(other)
             }
 
-            fn into_value(&self) -> Value {
+            fn to_value(&self) -> Value {
                 ($into_value)(*self)
             }
         }
 
+        #[allow(clippy::all)]
         impl $crate::ProtoEncode for $t {
             fn encode_as_field(&self, tag: ::core::num::NonZeroU32, buf: &mut dyn $crate::prost::bytes::BufMut) {
                 MappedInt::<{ <$t>::DEFAULT_ENCODING }, _>(*self).encode_as_field(tag, buf)
@@ -75,6 +76,7 @@ macro_rules! impl_protoscalar {
             }
         }
 
+        #[allow(clippy::all)]
         impl $crate::Proto for $t {
             fn merge_self(
                 &mut self,
@@ -88,12 +90,6 @@ macro_rules! impl_protoscalar {
                 *self = mapped.0;
 
                 Ok(())
-            }
-        }
-
-        impl $crate::IsDefault for $t {
-            fn is_default(&self) -> bool {
-                *self == Self::default()
             }
         }
     };
