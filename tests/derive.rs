@@ -51,7 +51,7 @@ impl<A: DummyOne, B: DummyTwo, C: DummyThree> autoproto::IsDefault for Oneof<A, 
 
 #[cfg(test)]
 mod tests {
-    use super::{DummyOne, DummyThree, DummyTwo, Foo, Oneof, SomeStruct, Unit, Wrapper};
+    use super::{DummyOne, DummyThree, DummyTwo, Foo, SomeStruct, Unit, Wrapper};
     use autoproto::prost::Message;
 
     use quickcheck::TestResult;
@@ -89,7 +89,7 @@ mod tests {
             B: DummyTwo + Default + std::fmt::Debug + Send + Sync + autoproto::Proto,
             C: DummyThree + Default + std::fmt::Debug + Send + Sync + autoproto::Proto,
         >() {
-            assert_impl::<Oneof<A, B, C>>();
+            assert_impl::<super::Oneof<A, B, C>>();
         }
     };
 
@@ -223,30 +223,40 @@ mod tests {
         );
     }
 
+    type FirstA = Foo<u64, u32>;
+    type FirstB = Foo<u32, f32>;
+    type SecondA = SomeStruct<Foo<f32, u32>, Foo<u32, u64>>;
+    type SecondB = SomeStruct<Foo<u32, u64>, Foo<f32, u64>>;
+
+    #[derive(Copy, Clone, PartialEq, Debug, autoproto::Message)]
+    enum Oneof {
+        Nothing,
+        First { a: FirstA, b: FirstB },
+        Second { a: SecondA, b: SecondB },
+    }
+
+    impl Default for Oneof {
+        fn default() -> Self {
+            Self::Nothing
+        }
+    }
+
+    impl autoproto::IsDefault for Oneof {
+        fn is_default(&self) -> bool {
+            if let Self::Nothing = self {
+                true
+            } else {
+                false
+            }
+        }
+    }
+
     #[quickcheck]
     fn oneof_same_as_with_optional_fields(args: Option<(bool, u32, u64, f32)>) {
-        type FirstA = Foo<u64, u32>;
-        type FirstB = Foo<u32, f32>;
-        type SecondA = SomeStruct<Foo<f32, u32>, Foo<u32, u64>>;
-        type SecondB = SomeStruct<Foo<u32, u64>, Foo<f32, u64>>;
-
-        #[derive(Copy, Clone, PartialEq, Debug, autoproto::Message)]
-        enum Oneof {
-            #[autoproto(tag = 1)]
-            Nothing,
-            #[autoproto(tag = 2)]
-            First { a: FirstA, b: FirstB },
-            #[autoproto(tag = 3)]
-            Second { a: SecondA, b: SecondB },
-        }
-
         #[derive(Copy, Clone, PartialEq, Debug, autoproto::Message)]
         struct OptionalFields {
-            #[autoproto(tag = 1)]
             nothing: Option<()>,
-            #[autoproto(tag = 2)]
             a: Option<SomeStruct<FirstA, FirstB>>,
-            #[autoproto(tag = 3)]
             b: Option<SomeStruct<SecondA, SecondB>>,
         }
 
@@ -263,22 +273,6 @@ mod tests {
         impl autoproto::IsDefault for OptionalFields {
             fn is_default(&self) -> bool {
                 self.nothing.is_some() && self.a.is_none() && self.b.is_none()
-            }
-        }
-
-        impl Default for Oneof {
-            fn default() -> Self {
-                Self::Nothing
-            }
-        }
-
-        impl autoproto::IsDefault for Oneof {
-            fn is_default(&self) -> bool {
-                if let Self::Nothing = self {
-                    true
-                } else {
-                    false
-                }
             }
         }
 
@@ -327,5 +321,56 @@ mod tests {
         };
 
         assert_eq!(oneof.encode_to_vec(), optional.encode_to_vec());
+    }
+
+    #[quickcheck]
+    fn oneof_same_as_prost(args: Option<(bool, u32, u64, f32)>) {
+        #[derive(::prost::Message)]
+        struct Outer {
+            #[prost(oneof = "Inner", tags = "1, 2, 3")]
+            inner: Option<Inner>,
+        }
+
+        #[derive(::prost::Oneof)]
+        enum Inner {
+            #[prost(message, tag = 1)]
+            Nothing(()),
+            #[prost(message, tag = 2)]
+            First(SomeStruct<FirstA, FirstB>),
+            #[prost(message, tag = 3)]
+            Second(SomeStruct<SecondA, SecondB>),
+        }
+
+        fn to_prost(val: &Oneof) -> Outer {
+            let inner = match *val {
+                Oneof::Nothing => Inner::Nothing(()),
+                Oneof::First { a, b } => Inner::First(SomeStruct { a, b }),
+                Oneof::Second { a, b } => Inner::Second(SomeStruct { a, b }),
+            };
+
+            Outer { inner: Some(inner) }
+        }
+
+        let oneof = match args {
+            None => Oneof::Nothing,
+            Some((true, uint32, uint64, float)) => Oneof::First {
+                a: Foo(uint64, uint32),
+                b: Foo(uint32, float),
+            },
+            Some((false, uint32, uint64, float)) => Oneof::Second {
+                a: SomeStruct {
+                    a: Foo(float, uint32),
+                    b: Foo(uint32, uint64),
+                },
+                b: SomeStruct {
+                    a: Foo(uint32, uint64),
+                    b: Foo(float, uint64),
+                },
+            },
+        };
+
+        let prost = to_prost(&oneof);
+
+        assert_eq!(oneof.encode_to_vec(), prost.encode_to_vec());
     }
 }
