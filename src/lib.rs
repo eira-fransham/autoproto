@@ -1,6 +1,6 @@
 #![feature(const_generics, generic_associated_types)]
 
-pub use autoproto_derive::{IsDefault, Message, ProtoEncode, Proto};
+pub use autoproto_derive::{IsDefault, Message, Proto, ProtoEncode};
 
 pub use prost;
 pub use prost::bytes;
@@ -10,7 +10,6 @@ pub mod macros;
 
 use prost::encoding::{DecodeContext, WireType};
 use std::{
-    borrow::{Cow, ToOwned},
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     convert::{TryFrom, TryInto},
     fmt::{self, Debug},
@@ -54,23 +53,6 @@ where
 {
     fn is_default(&self) -> bool {
         (**self).is_default()
-    }
-}
-
-// These two impls are just so we can use `Cow`. The fact that you can't use the ref capabilities of
-// `Cow` without _also_ allowing conversion to an owned type is such an annoying limitation of `Cow`.
-impl ToOwned for dyn Proto + '_ {
-    type Owned = Box<Self>;
-
-    fn to_owned(&self) -> Self::Owned {
-        panic!("Unable to create `Box<Self>`")
-    }
-}
-impl ToOwned for dyn ProtoEncode + '_ {
-    type Owned = Box<Self>;
-
-    fn to_owned(&self) -> Self::Owned {
-        panic!("Unable to create `Box<Self>`")
     }
 }
 
@@ -153,10 +135,12 @@ pub trait IsDefault {
 }
 
 pub trait ProtoOneof: IsDefault {
-    fn variant(&self) -> (NonZeroU32, Cow<'_, dyn ProtoEncode>);
+    fn variant<F, T>(&self, func: F) -> T
+    where
+        F: FnOnce(&(dyn ProtoEncode + '_), NonZeroU32) -> T;
     fn exec_merge<F, T>(&mut self, tag: NonZeroU32, func: F) -> Option<T>
     where
-        F: FnMut(&mut (dyn Proto + '_)) -> T;
+        F: FnOnce(&mut (dyn Proto + '_)) -> T;
 }
 
 impl<T> ProtoEncode for Option<T>
@@ -268,7 +252,7 @@ where
 
 /// Minimal set of methods needed to derive a `prost::Message` implementation for `T: ProtoStruct`.
 pub trait ProtoStruct: IsDefault {
-    type Fields<'a>: IntoIterator<Item = (NonZeroU32, Cow<'a, dyn ProtoEncode>)> + 'a
+    type Fields<'a>: IntoIterator<Item = (NonZeroU32, &'a (dyn ProtoEncode + 'a))> + 'a
     where
         Self: 'a;
 

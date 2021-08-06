@@ -224,7 +224,7 @@ mod tests {
     }
 
     #[quickcheck]
-    fn oneof_same_as_with_optional_fields((tag, uint32, uint64, float): (bool, u32, u64, f32)) {
+    fn oneof_same_as_with_optional_fields(args: Option<(bool, u32, u64, f32)>) {
         type FirstA = Foo<u64, u32>;
         type FirstB = Foo<u32, f32>;
         type SecondA = SomeStruct<Foo<f32, u32>, Foo<u32, u64>>;
@@ -282,8 +282,9 @@ mod tests {
             }
         }
 
-        let (oneof, optional) = if tag {
-            (
+        let (oneof, optional) = match args {
+            None => (Oneof::Nothing, OptionalFields::default()),
+            Some((true, uint32, uint64, float)) => (
                 Oneof::First {
                     a: Foo(uint64, uint32),
                     b: Foo(uint32, float),
@@ -296,9 +297,8 @@ mod tests {
                     b: None,
                     nothing: None,
                 },
-            )
-        } else {
-            (
+            ),
+            Some((false, uint32, uint64, float)) => (
                 Oneof::Second {
                     a: SomeStruct {
                         a: Foo(float, uint32),
@@ -323,7 +323,7 @@ mod tests {
                     }),
                     nothing: None,
                 },
-            )
+            ),
         };
 
         assert_eq!(oneof.encode_to_vec(), optional.encode_to_vec());

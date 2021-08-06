@@ -361,15 +361,9 @@ fn try_derive_oneof(
                     }
                 }
 
-                let __proto_dummy_struct = #ident #variant_bindings;
-
-                (
+                __proto_arg_func(
+                    &#ident #variant_bindings,
                     ::core::num::NonZeroU32::new(#tag).unwrap(),
-                    ::std::borrow::Cow::Owned(
-                        ::std::boxed::Box::new(
-                            __proto_dummy_struct
-                        ) as ::std::boxed::Box<dyn ::autoproto::ProtoEncode>
-                    ),
                 )
             }
         )
@@ -377,9 +371,9 @@ fn try_derive_oneof(
 
     fn make_unit_variant_get_field_arm<T: ToTokens>(ident: &Ident, tag: &Lit, brackets: T) -> Arm {
         syn::parse_quote!(
-            Self::#ident #brackets => (
+            Self::#ident #brackets => __proto_arg_func(
+                &(),
                 ::core::num::NonZeroU32::new(#tag).unwrap(),
-                ::std::borrow::Cow::Borrowed(&()),
             )
         )
     }
@@ -397,9 +391,9 @@ fn try_derive_oneof(
         let field_name_pat = brackets(quote!(#field_name));
 
         syn::parse_quote!(
-            Self::#ident #field_name_pat => (
+            Self::#ident #field_name_pat => __proto_arg_func(
+                #field_name,
                 ::core::num::NonZeroU32::new(#tag).unwrap(),
-                ::std::borrow::Cow::Borrowed(#field_name),
             )
         )
     }
@@ -585,14 +579,14 @@ fn try_derive_oneof(
 
                         let mut __proto_dummy_struct = #ident #variant_bindings;
 
-                        func(&mut __proto_dummy_struct)
+                        __proto_arg_func(&mut __proto_dummy_struct)
                     }
                     _ => {
                         #owned_construct
 
                         let mut __proto_dummy_struct = #ident #variant_bindings;
 
-                        let out = func(&mut __proto_dummy_struct);
+                        let out = __proto_arg_func(&mut __proto_dummy_struct);
 
                         let #ident #deconstruct_dummy = __proto_dummy_struct;
 
@@ -607,7 +601,7 @@ fn try_derive_oneof(
 
     fn make_unit_variant_exec_merge_arm(tag: &Lit) -> Arm {
         syn::parse_quote!(
-            #tag => func(&mut ())
+            #tag => __proto_arg_func(&mut ())
         )
     }
 
@@ -631,7 +625,7 @@ fn try_derive_oneof(
             #tag => {
                 let mut #name = Default::default();
 
-                let out = func(&mut #name);
+                let out = __proto_arg_func(&mut #name);
 
                 *self = Self::#ident #construct_variant;
 
@@ -719,7 +713,7 @@ fn try_derive_oneof(
             make_variant_exec_merge_arm(&variant.ident, tag, generics, &variant.fields)
         })
         .chain(iter::once(
-            syn::parse_quote!(_ => { return ::core::option::Option::<T>::None; }),
+            syn::parse_quote!(_ => { return ::core::option::Option::<__FuncOut>::None; }),
         ))
         .collect();
 
@@ -770,15 +764,18 @@ fn try_derive_oneof(
         impl #impl_generics ::autoproto::ProtoOneof for #ident #ty_generics
         #protooneof_where_clause
         {
-            fn variant(&self) -> (::core::num::NonZeroU32, ::std::borrow::Cow<'_, dyn ::autoproto::ProtoEncode>) {
+            fn variant<__Func, __FuncOut>(&self, __proto_arg_func: __Func) -> __FuncOut
+            where
+                __Func: ::core::ops::FnOnce(&(dyn ::autoproto::ProtoEncode + '_), ::core::num::NonZeroU32) -> __FuncOut
+            {
                 #get_variant
             }
 
-            fn exec_merge<F, T>(&mut self, tag: ::core::num::NonZeroU32, mut func: F) -> Option<T>
+            fn exec_merge<__Func, __FuncOut>(&mut self, tag: ::core::num::NonZeroU32, __proto_arg_func: __Func) -> Option<__FuncOut>
             where
-                F: FnMut(&mut dyn ::autoproto::Proto) -> T
+                __Func: ::core::ops::FnOnce(&mut (dyn ::autoproto::Proto + '_)) -> __FuncOut
             {
-                ::core::option::Option::<T>::Some(#exec_merge)
+                ::core::option::Option::<__FuncOut>::Some(#exec_merge)
             }
         }
 
@@ -818,32 +815,27 @@ fn try_derive_protostruct<'a>(
     let fields = fields?;
 
     let fields_array: Punctuated<_, Token!(,)> = fields
-                    .iter()
-                    .map(|(tag, member)| {
-                        let tag: Lit =
-                            LitInt::new(&tag.get().to_string(), Span::call_site()).into();
+        .iter()
+        .map(|(tag, member)| {
+            let tag: Lit = LitInt::new(&tag.get().to_string(), Span::call_site()).into();
 
-                        quote!(
-                            (
-                                ::core::num::NonZeroU32::new(#tag).unwrap(),
-                                ::std::borrow::Cow::Borrowed(&self.#member as &dyn ::autoproto::ProtoEncode),
-                            )
-                        )
-                    })
-                    .collect();
-
-    let get_field_mut: Punctuated<Expr, Token!(else)> = fields
-        .into_iter()
-        .map::<Expr, _>(|(tag, member)| {
-            let tag = tag.get();
-
-            syn::parse_quote!(
-                if tag.get() == #tag {
-                    Some(&mut self.#member)
-                }
+            quote!(
+                (
+                    ::core::num::NonZeroU32::new(#tag).unwrap(),
+                    &self.#member as &dyn ::autoproto::ProtoEncode,
+                )
             )
         })
-        .chain(iter::once(syn::parse_quote!({ None })))
+        .collect();
+
+    let get_field_mut: Punctuated<_, Token!(,)> = fields
+        .into_iter()
+        .map::<Arm, _>(|(tag, member)| {
+            let tag: Lit = LitInt::new(&tag.get().to_string(), Span::call_site()).into();
+
+            syn::parse_quote!(#tag => &mut self.#member)
+        })
+        .chain(iter::once(syn::parse_quote!(_ => { return None; })))
         .collect();
 
     let where_clause_builder = WhereClauseBuilder::new(generics);
@@ -860,7 +852,13 @@ fn try_derive_protostruct<'a>(
             type Fields<'__field_lifetime>
             where
                 Self: '__field_lifetime
-            = [(::core::num::NonZeroU32, ::std::borrow::Cow<'__field_lifetime, dyn ::autoproto::ProtoEncode>); #num_fields];
+            = [
+                (
+                    ::core::num::NonZeroU32,
+                    &'__field_lifetime (dyn ::autoproto::ProtoEncode + '__field_lifetime),
+                );
+                #num_fields
+            ];
 
             fn fields(&self) -> Self::Fields<'_> {
                 [#fields_array]
@@ -874,7 +872,9 @@ fn try_derive_protostruct<'a>(
             #protostructmut_where_clause
             {
                 fn field_mut(&mut self, tag: ::core::num::NonZeroU32) -> Option<&mut dyn ::autoproto::Proto> {
-                    #get_field_mut
+                    Some(match ::core::num::NonZeroU32::get(tag) {
+                        #get_field_mut
+                    })
                 }
             }
         }),

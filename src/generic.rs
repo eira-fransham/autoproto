@@ -123,11 +123,7 @@ pub mod protostruct {
         let len = message_encoded_len(this);
         let buf = &mut buf;
 
-        prost::encoding::encode_key(
-            tag.get(),
-            prost::encoding::WireType::LengthDelimited,
-            buf,
-        );
+        prost::encoding::encode_key(tag.get(), prost::encoding::WireType::LengthDelimited, buf);
         prost::encoding::encode_varint(len as u64, buf);
         message_encode_raw(this, buf)
     }
@@ -170,7 +166,7 @@ pub mod default {
 }
 
 pub mod protooneof {
-    use crate::ProtoOneof;
+    use crate::{Proto, ProtoEncode, ProtoOneof};
     use prost::{
         bytes::{Buf, BufMut},
         encoding::{DecodeContext, WireType},
@@ -179,10 +175,7 @@ pub mod protooneof {
     use std::num::NonZeroU32;
 
     pub fn message_encode_raw<T: ProtoOneof, B: BufMut>(this: &T, buf: &mut B) {
-        if !this.is_default() {
-            let (tag, inner) = this.variant();
-            inner.encode_as_field(tag, buf)
-        }
+        this.variant(|inner, tag| inner.encode_as_field(tag, buf))
     }
 
     pub fn message_merge_field<T: ProtoOneof, B: Buf>(
@@ -201,8 +194,7 @@ pub mod protooneof {
     }
 
     pub fn message_encoded_len<T: ProtoOneof>(this: &T) -> usize {
-        let (tag, inner) = this.variant();
-        inner.encoded_len_as_field(tag)
+        this.variant(|inner, tag| inner.encoded_len_as_field(tag))
     }
 }
 
