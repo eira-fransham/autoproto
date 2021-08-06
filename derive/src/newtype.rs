@@ -1,18 +1,17 @@
-use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{Ident, ItemImpl, Member, WhereClause};
+use syn::{Ident, ItemImpl, Member};
 
-pub fn protoencode<F>(
+use crate::util::WhereClauseBuilder;
+
+pub fn protoencode(
     ident: &Ident,
     field: &Member,
     impl_generics: &syn::ImplGenerics,
     ty_generics: &syn::TypeGenerics,
-    make_where_clause: F,
-) -> ItemImpl
-where
-    F: Fn(TokenStream2) -> WhereClause,
-{
-    let protoencode_where_clause = make_where_clause(quote!(::autoproto::ProtoEncode));
+    where_clause_builder: &mut WhereClauseBuilder,
+) -> ItemImpl {
+    let protoencode_where_clause =
+        where_clause_builder.with_bound(quote!(::autoproto::ProtoEncode));
 
     syn::parse_quote!(
         impl #impl_generics ::autoproto::ProtoEncode for #ident #ty_generics #protoencode_where_clause {
@@ -27,17 +26,14 @@ where
     )
 }
 
-pub fn proto<F>(
+pub fn proto(
     ident: &Ident,
     field: &Member,
     impl_generics: &syn::ImplGenerics,
     ty_generics: &syn::TypeGenerics,
-    make_where_clause: F,
-) -> ItemImpl
-where
-    F: Fn(TokenStream2) -> WhereClause,
-{
-    let proto_where_clause = make_where_clause(quote!(::autoproto::Proto));
+    where_clause_builder: &mut WhereClauseBuilder,
+) -> ItemImpl {
+    let proto_where_clause = where_clause_builder.with_bound(quote!(::autoproto::Proto));
 
     syn::parse_quote!(
         impl #impl_generics ::autoproto::Proto for #ident #ty_generics #proto_where_clause {
@@ -53,17 +49,14 @@ where
     )
 }
 
-pub fn message<F>(
+pub fn message(
     ident: &Ident,
     field: &Member,
     impl_generics: &syn::ImplGenerics,
     ty_generics: &syn::TypeGenerics,
-    make_where_clause: F,
-) -> ItemImpl
-where
-    F: Fn(TokenStream2) -> WhereClause,
-{
-    let message_where_clause = make_where_clause(quote!(::autoproto::prost::Message));
+    where_clause_builder: &mut WhereClauseBuilder,
+) -> ItemImpl {
+    let message_where_clause = where_clause_builder.with_bound(quote!(::autoproto::prost::Message));
 
     syn::parse_quote!(
         impl #impl_generics ::autoproto::prost::Message for #ident #ty_generics #message_where_clause {
@@ -95,17 +88,14 @@ where
     )
 }
 
-pub fn is_default<F>(
+pub fn is_default(
     ident: &Ident,
     field: &Member,
     impl_generics: &syn::ImplGenerics,
     ty_generics: &syn::TypeGenerics,
-    make_where_clause: F,
-) -> ItemImpl
-where
-    F: Fn(TokenStream2) -> WhereClause,
-{
-    let is_default_where_clause = make_where_clause(quote!(::autoproto::IsDefault));
+    where_clause_builder: &mut WhereClauseBuilder,
+) -> ItemImpl {
+    let is_default_where_clause = where_clause_builder.with_bound(quote!(::autoproto::IsDefault));
 
     syn::parse_quote!(
         impl #impl_generics ::autoproto::IsDefault for #ident #ty_generics #is_default_where_clause {

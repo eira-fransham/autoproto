@@ -1,6 +1,6 @@
 #![feature(const_generics, generic_associated_types)]
 
-pub use autoproto_derive::{Message, ProtoEncode};
+pub use autoproto_derive::{IsDefault, Message, ProtoEncode, Proto};
 
 pub use prost;
 pub use prost::bytes;
@@ -18,6 +18,16 @@ use std::{
     marker::PhantomData,
     num::NonZeroU32,
 };
+
+pub trait Clear {
+    fn clear(&mut self);
+}
+
+impl<T: Default> Clear for T {
+    fn clear(&mut self) {
+        *self = Default::default();
+    }
+}
 
 pub trait ToProtoSpec {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result;
@@ -64,13 +74,14 @@ impl ToOwned for dyn ProtoEncode + '_ {
     }
 }
 
+// This is different to `()`, which is an empty struct (and so takes up space for the field tag + a
+// marker for 0 bytes). `PhantomData` should not be encoded at all. In theory we shouldn't need to
+// encode `()` either, but `prost` does and we're aiming for byte-for-byte compatibility.
 impl<T> ProtoEncode for PhantomData<T> {
-    fn encode_as_field(&self, tag: NonZeroU32, buf: &mut dyn prost::bytes::BufMut) {
-        <()>::encode_as_field(&(), tag, buf)
-    }
+    fn encode_as_field(&self, _tag: NonZeroU32, _buf: &mut dyn prost::bytes::BufMut) {}
 
-    fn encoded_len_as_field(&self, tag: NonZeroU32) -> usize {
-        <()>::encoded_len_as_field(&(), tag)
+    fn encoded_len_as_field(&self, _tag: NonZeroU32) -> usize {
+        0
     }
 }
 
@@ -82,20 +93,6 @@ impl<T> Proto for PhantomData<T> {
         ctx: DecodeContext,
     ) -> Result<(), prost::DecodeError> {
         <()>::merge_self(&mut (), wire_type, buf, ctx)
-    }
-}
-
-impl<T> Proto for &'_ mut T
-where
-    T: Proto,
-{
-    fn merge_self(
-        &mut self,
-        wire_type: WireType,
-        buf: &mut dyn prost::bytes::Buf,
-        ctx: DecodeContext,
-    ) -> Result<(), prost::DecodeError> {
-        (**self).merge_self(wire_type, buf, ctx)
     }
 }
 
@@ -137,7 +134,7 @@ where
 
 /// Extension trait to make generic code using protobuf messages easier to write,
 /// by avoiding the need to explicitly spell out the wire type in the macro.
-pub trait Proto: ProtoEncode {
+pub trait Proto: ProtoEncode + Clear {
     /// Merge this type. For messages this will consume the buffer, setting each tag respectively.
     /// For scalar values this will decode the next value and set `self` to it. This is different
     /// to `Message::merge` in `prost`, which does not understand scalar types at all.
@@ -159,7 +156,7 @@ pub trait ProtoOneof: IsDefault {
     fn variant(&self) -> (NonZeroU32, Cow<'_, dyn ProtoEncode>);
     fn exec_merge<F, T>(&mut self, tag: NonZeroU32, func: F) -> Option<T>
     where
-        F: FnMut(&mut dyn Proto) -> T;
+        F: FnMut(&mut (dyn Proto + '_)) -> T;
 }
 
 impl<T> ProtoEncode for Option<T>
@@ -279,7 +276,7 @@ pub trait ProtoStruct: IsDefault {
 }
 
 pub trait ProtoStructMut: ProtoStruct {
-    fn field_mut(&mut self, tag: NonZeroU32) -> Option<&mut dyn Proto>;
+    fn field_mut(&mut self, tag: NonZeroU32) -> Option<&mut (dyn Proto + '_)>;
 }
 
 pub trait ProtoScalar: Clone + Default + Proto + Sized {
@@ -509,6 +506,15 @@ impl From<Fixed> for ScalarEncodingKind {
 
 #[derive(Debug, Copy, Clone)]
 pub struct MappedInt<const ENCODING: ScalarEncoding, T>(pub T);
+
+impl<const ENCODING: ScalarEncoding, T> Clear for MappedInt<ENCODING, T>
+where
+    T: Clear,
+{
+    fn clear(&mut self) {
+        self.0.clear()
+    }
+}
 
 impl<const ENCODING: ScalarEncoding, T> IsDefault for MappedInt<ENCODING, T>
 where

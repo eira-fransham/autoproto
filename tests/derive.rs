@@ -1,19 +1,19 @@
-#![feature(generic_associated_types)]
+#![feature(generic_associated_types, trivial_bounds)]
 #![allow(dead_code)]
 
-#[derive(Copy, Clone, PartialEq, Default, Debug, autoproto::Message)]
+#[derive(Copy, Clone, PartialEq, autoproto::IsDefault, Default, Debug, autoproto::Message)]
 struct Unit;
 
-#[derive(Copy, Clone, PartialEq, Default, Debug, autoproto::Message)]
+#[derive(Copy, Clone, PartialEq, autoproto::IsDefault, Default, Debug, autoproto::Message)]
 struct Foo<A, B>(#[autoproto(tag = 4)] A, #[autoproto(tag = 5)] B);
 
-#[derive(Copy, Clone, PartialEq, Default, Debug, autoproto::Message)]
+#[derive(Copy, Clone, PartialEq, autoproto::IsDefault, Default, Debug, autoproto::Message)]
 struct SomeStruct<A, B> {
     a: A,
     b: B,
 }
 
-#[derive(Copy, Clone, PartialEq, Default, Debug, autoproto::Message)]
+#[derive(Copy, Clone, PartialEq, autoproto::IsDefault, Default, Debug, autoproto::Message)]
 #[autoproto(transparent)]
 struct Wrapper(SomeStruct<Foo<u32, u64>, SomeStruct<f32, Unit>>);
 
@@ -77,8 +77,8 @@ mod tests {
         fn assert_impl<T: Message + autoproto::Proto>() {}
 
         fn assert_foo_and_somestruct_impl<
-            A: Default + std::fmt::Debug + Send + Sync + autoproto::Proto,
-            B: Default + std::fmt::Debug + Send + Sync + autoproto::Proto,
+            A: PartialEq + Default + std::fmt::Debug + Send + Sync + autoproto::Proto,
+            B: PartialEq + Default + std::fmt::Debug + Send + Sync + autoproto::Proto,
         >() {
             assert_impl::<Foo<A, B>>();
             assert_impl::<SomeStruct<A, B>>();
@@ -225,29 +225,29 @@ mod tests {
 
     #[quickcheck]
     fn oneof_same_as_with_optional_fields((tag, uint32, uint64, float): (bool, u32, u64, f32)) {
+        type FirstA = Foo<u64, u32>;
+        type FirstB = Foo<u32, f32>;
+        type SecondA = SomeStruct<Foo<f32, u32>, Foo<u32, u64>>;
+        type SecondB = SomeStruct<Foo<u32, u64>, Foo<f32, u64>>;
+
         #[derive(Copy, Clone, PartialEq, Debug, autoproto::Message)]
         enum Oneof {
+            #[autoproto(tag = 1)]
             Nothing,
-            First {
-                a: Foo<u64, u32>,
-                b: Foo<u32, f32>,
-            },
-            Second {
-                a: SomeStruct<Foo<f32, u32>, Foo<u32, u64>>,
-                b: SomeStruct<Foo<u32, u64>, Foo<f32, u64>>,
-            },
+            #[autoproto(tag = 2)]
+            First { a: FirstA, b: FirstB },
+            #[autoproto(tag = 3)]
+            Second { a: SecondA, b: SecondB },
         }
 
         #[derive(Copy, Clone, PartialEq, Debug, autoproto::Message)]
         struct OptionalFields {
+            #[autoproto(tag = 1)]
             nothing: Option<()>,
-            a: Option<SomeStruct<Foo<u64, u32>, Foo<u32, f32>>>,
-            b: Option<
-                SomeStruct<
-                    SomeStruct<Foo<f32, u32>, Foo<u32, u64>>,
-                    SomeStruct<Foo<u32, u64>, Foo<f32, u64>>,
-                >,
-            >,
+            #[autoproto(tag = 2)]
+            a: Option<SomeStruct<FirstA, FirstB>>,
+            #[autoproto(tag = 3)]
+            b: Option<SomeStruct<SecondA, SecondB>>,
         }
 
         impl Default for OptionalFields {
@@ -260,9 +260,25 @@ mod tests {
             }
         }
 
+        impl autoproto::IsDefault for OptionalFields {
+            fn is_default(&self) -> bool {
+                self.nothing.is_some() && self.a.is_none() && self.b.is_none()
+            }
+        }
+
         impl Default for Oneof {
             fn default() -> Self {
                 Self::Nothing
+            }
+        }
+
+        impl autoproto::IsDefault for Oneof {
+            fn is_default(&self) -> bool {
+                if let Self::Nothing = self {
+                    true
+                } else {
+                    false
+                }
             }
         }
 
@@ -309,5 +325,7 @@ mod tests {
                 },
             )
         };
+
+        assert_eq!(oneof.encode_to_vec(), optional.encode_to_vec());
     }
 }

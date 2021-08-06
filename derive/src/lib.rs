@@ -1,34 +1,124 @@
+#![feature(backtrace)]
+
 extern crate proc_macro;
 
-use anyhow::{anyhow, bail, Error};
+use anyhow::{anyhow, bail};
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{quote, ToTokens};
 use std::{iter, num::NonZeroU32};
 use syn::{
-    punctuated::Punctuated, Arm, Attribute, Data, DataEnum, DataStruct, DeriveInput, Expr,
+    punctuated::Punctuated, Arm, Attribute, Block, Data, DataEnum, DataStruct, DeriveInput, Expr,
     ExprMatch, Field, Fields, FieldsNamed, FieldsUnnamed, GenericParam, Generics, Ident, ItemImpl,
-    Lifetime, LifetimeDef, Lit, LitInt, Member, Meta, MetaList, NestedMeta, Token, Type,
-    TypeReference, WhereClause, WherePredicate,
+    ItemStruct, Lit, LitInt, Member, Stmt, Token, Type, TypePath,
 };
 
 mod newtype;
+mod util;
 
-type Result<T> = std::result::Result<T, Error>;
+use util::{FieldAttributes, MessageAttributes, Result, WhereClauseBuilder};
 
-#[proc_macro_derive(Message, attributes(serde, autoproto))]
+#[proc_macro_derive(Message, attributes(autoproto))]
 pub fn derive_message(input: TokenStream) -> TokenStream {
+    if cfg!(debug_assertions) {
+        std::panic::set_hook(Box::new(|_panic_info| {
+            let backtrace = std::backtrace::Backtrace::force_capture();
+            eprintln!("{}", backtrace);
+        }));
+    }
+
     try_derive_message(input).unwrap().into()
 }
 
-#[proc_macro_derive(Proto, attributes(serde, autoproto))]
+#[proc_macro_derive(Proto, attributes(autoproto))]
 pub fn derive_proto(input: TokenStream) -> TokenStream {
     try_derive_proto(input).unwrap().into()
 }
 
-#[proc_macro_derive(ProtoEncode, attributes(serde, autoproto))]
+#[proc_macro_derive(ProtoEncode, attributes(autoproto))]
 pub fn derive_protoencode(input: TokenStream) -> TokenStream {
     try_derive_protoencode(input).unwrap().into()
+}
+
+#[proc_macro_derive(IsDefault, attributes(autoproto))]
+pub fn derive_is_default(input: TokenStream) -> TokenStream {
+    try_derive_is_default(input).unwrap().into()
+}
+
+fn try_derive_is_default(input: TokenStream) -> Result<TokenStream2> {
+    let input: DeriveInput = syn::parse(input)?;
+    let DeriveInput {
+        attrs,
+        vis: _,
+        ident,
+        generics,
+        data,
+    } = &input;
+
+    let attrs = MessageAttributes::new(attrs)?;
+
+    let (impl_generics, ty_generics, _) = generics.split_for_impl();
+    if attrs.transparent {
+        let inner_field = match data {
+            Data::Struct(DataStruct {
+                fields: Fields::Named(FieldsNamed { named: fields, .. }),
+                ..
+            })
+            | Data::Struct(DataStruct {
+                fields:
+                    Fields::Unnamed(FieldsUnnamed {
+                        unnamed: fields, ..
+                    }),
+                ..
+            }) => {
+                if fields.len() != 1 {
+                    bail!("`transparent` message must have exactly one field");
+                }
+
+                fields.first().ok_or_else(|| anyhow!("Programmer error"))?
+            }
+            Data::Struct(DataStruct {
+                fields: Fields::Unit,
+                ..
+            }) => {
+                bail!("Cannot have a `transparent` message without fields");
+            }
+            _ => {
+                bail!("Invalid type for a `transparent` message");
+            }
+        };
+
+        let field: Member = inner_field
+            .ident
+            .clone()
+            .map(Member::Named)
+            .unwrap_or_else(|| Member::Unnamed(0.into()));
+
+        let mut where_clause_builder = WhereClauseBuilder::new(generics);
+        let is_default_impl = newtype::is_default(
+            ident,
+            &field,
+            &impl_generics,
+            &ty_generics,
+            &mut where_clause_builder,
+        );
+
+        Ok(quote! { #is_default_impl })
+    } else {
+        let where_clause_builder = WhereClauseBuilder::new(&generics);
+        let where_clause = where_clause_builder
+            .with_self_bound(quote!(::core::default::Default + ::core::cmp::PartialEq));
+
+        Ok(quote! {
+            impl #impl_generics ::autoproto::IsDefault for #ident #ty_generics
+            #where_clause
+            {
+                fn is_default(&self) -> bool {
+                    ::autoproto::generic::default::is_default(self)
+                }
+            }
+        })
+    }
 }
 
 enum DeriveMode {
@@ -84,89 +174,63 @@ fn try_derive_protoencode(input: TokenStream) -> Result<TokenStream2> {
             }
         };
 
-        let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+        let (impl_generics, ty_generics, _) = generics.split_for_impl();
         let field: Member = inner_field
             .ident
             .clone()
             .map(Member::Named)
             .unwrap_or_else(|| Member::Unnamed(0.into()));
 
-        let make_where_clause = make_where_clause_fn(generics, where_clause);
-        let (protoencode_impl, is_default_impl) = (
-            newtype::protoencode(
-                ident,
-                &field,
-                &impl_generics,
-                &ty_generics,
-                &make_where_clause,
-            ),
-            newtype::is_default(
-                ident,
-                &field,
-                &impl_generics,
-                &ty_generics,
-                &make_where_clause,
-            ),
+        let mut where_clause_builder = WhereClauseBuilder::new(generics);
+        let protoencode_impl = newtype::protoencode(
+            ident,
+            &field,
+            &impl_generics,
+            &ty_generics,
+            &mut where_clause_builder,
         );
 
-        return Ok(quote! {
-            #protoencode_impl
-            #is_default_impl
-        });
-    }
+        Ok(quote! { #protoencode_impl })
+    } else {
+        match data {
+            Data::Struct(DataStruct {
+                fields: Fields::Named(FieldsNamed { named: fields, .. }),
+                ..
+            })
+            | Data::Struct(DataStruct {
+                fields:
+                    Fields::Unnamed(FieldsUnnamed {
+                        unnamed: fields, ..
+                    }),
+                ..
+            }) => {
+                let protostruct_impl = try_derive_protostruct(
+                    fields.into_iter(),
+                    ident,
+                    generics,
+                    DeriveMode::ImmutableOnly,
+                )?;
 
-    match data {
-        Data::Struct(DataStruct {
-            fields: Fields::Named(FieldsNamed { named: fields, .. }),
-            ..
-        })
-        | Data::Struct(DataStruct {
-            fields:
-                Fields::Unnamed(FieldsUnnamed {
-                    unnamed: fields, ..
-                }),
-            ..
-        }) => {
-            let protostruct_impl = try_derive_protostruct(
-                fields.into_iter(),
-                ident,
-                generics,
-                DeriveMode::ImmutableOnly,
-            )?;
+                let (impl_generics, ty_generics, _) = generics.split_for_impl();
 
-            let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
-            let make_where_clause = make_where_clause_fn(generics, where_clause);
+                let protoencode_impl = impl_protoencode_for_protostruct(
+                    ident,
+                    &impl_generics,
+                    &ty_generics,
+                    &mut WhereClauseBuilder::new(generics),
+                );
 
-            let is_default_where_clause =
-                make_where_clause(quote!(::autoproto::IsDefault + ::autoproto::ProtoEncode));
-            let is_default_impl = impl_is_default_for_protostruct(
-                ident,
-                &impl_generics,
-                &ty_generics,
-                Some(&is_default_where_clause),
-            );
-
-            let protoencode_where_clause = make_where_clause(quote!(::autoproto::ProtoEncode));
-            let protoencode_impl = impl_protoencode_for_protostruct(
-                ident,
-                &impl_generics,
-                &ty_generics,
-                Some(&protoencode_where_clause),
-            );
-
-            Ok(quote!(
-                #protostruct_impl
-
-                #is_default_impl
-
-                #protoencode_impl
-            ))
-        }
-        Data::Union(..) => {
-            bail!("Message can not be derived for an untagged union (try using `enum`)")
-        }
-        _ => {
-            bail!("Currently unsupported type for `derive(ProtoEncode)`")
+                Ok(quote!(
+                    #protostruct_impl
+                    #protoencode_impl
+                ))
+            }
+            Data::Union(..) => {
+                bail!("Message can not be derived for an untagged union (try using `enum`)")
+            }
+            _ => {
+                bail!("Currently unsupported type for `derive(ProtoEncode)`")
+            }
         }
     }
 }
@@ -182,7 +246,7 @@ fn try_derive_message(input: TokenStream) -> Result<TokenStream2> {
     } = &input;
 
     match data {
-        Data::Struct(data) => try_derive_struct(attrs, ident, generics, data),
+        Data::Struct(data) => try_derive_message_for_struct(attrs, ident, generics, data),
         Data::Enum(data) => try_derive_oneof(attrs, ident, generics, data),
         Data::Union(..) => {
             bail!("Message can not be derived for an untagged union (try using `enum`)")
@@ -201,7 +265,7 @@ fn try_derive_proto(input: TokenStream) -> Result<TokenStream2> {
     } = &input;
 
     match data {
-        Data::Struct(_data) => todo!(),
+        Data::Struct(data) => try_derive_proto_for_struct(attrs, ident, generics, data),
         Data::Enum(data) => try_derive_enum(attrs, ident, generics, data),
         Data::Union(..) => {
             bail!("Message can not be derived for an untagged union (try using `enum`)")
@@ -226,11 +290,10 @@ fn try_derive_oneof(
 ) -> Result<TokenStream2> {
     fn make_variant_get_field_arm_with_fields<F, T, FIter>(
         ident: &Ident,
-        tag: Lit,
+        tag: &Lit,
         generics: &Generics,
         mut brackets: F,
         semicolon: Option<Token!(;)>,
-        dummy_field: Option<(Ident, Token!(:))>,
         fields: &FIter,
     ) -> Arm
     where
@@ -249,112 +312,70 @@ fn try_derive_oneof(
             })
             .collect::<Punctuated<_, Token!(,)>>();
 
-        let lifetime = Lifetime {
-            apostrophe: Span::call_site(),
-            ident: Ident::new("__dummy_lifetime", Span::call_site()),
-        };
+        let (typarams, dummy_fields): (Vec<Ident>, Punctuated<_, Token!(,)>) = fields
+            .into_iter()
+            .cloned()
+            .enumerate()
+            .map(|(i, field)| {
+                let tyident = Ident::new(&format!("__Ty{}", i), Span::call_site());
+                let ty = Type::Path(TypePath {
+                    qself: None,
+                    path: tyident.clone().into(),
+                });
 
-        let (_, ty_generics, _) = generics.split_for_impl();
+                (tyident, Field { ty, ..field })
+            })
+            .unzip();
 
         let dummy_generics = Generics {
-            params: generics
-                .params
-                .iter()
-                .cloned()
-                .chain(iter::once(GenericParam::Lifetime(LifetimeDef {
-                    attrs: vec![],
-                    lifetime: lifetime.clone(),
-                    colon_token: None,
-                    bounds: Default::default(),
-                })))
+            params: typarams
+                .into_iter()
+                .map(|name| GenericParam::Type(name.into()))
                 .collect(),
+            where_clause: None,
             ..generics.clone()
         };
 
-        let dummy_fields: Punctuated<_, Token!(,)> = fields
-            .into_iter()
-            .cloned()
-            .map(|field| {
-                let Field {
-                    attrs,
-                    vis,
-                    ident,
-                    colon_token,
-                    ty,
-                } = field;
-
-                let ty = Type::Reference(TypeReference {
-                    and_token: Default::default(),
-                    lifetime: Some(lifetime.clone()),
-                    mutability: None,
-                    elem: Box::new(ty),
-                });
-
-                Field {
-                    attrs,
-                    vis,
-                    ident,
-                    colon_token,
-                    ty,
-                }
-            })
-            .collect();
-
-        let phantom_lifetimes: Vec<Lifetime> = generics
-            .params
-            .iter()
-            .filter_map(|g| match g {
-                GenericParam::Lifetime(l) => Some(l.lifetime.clone()),
-                _ => None,
-            })
-            .collect();
-        let phantom_types: Punctuated<Ident, Token!(,)> = generics
-            .params
-            .iter()
-            .filter_map(|g| match g {
-                GenericParam::Type(t) => Some(t.ident.clone()),
-                _ => None,
-            })
-            .collect();
-
-        let mut phantom_inner_type: Type = syn::parse_quote!((#phantom_types));
-        for lifetime in phantom_lifetimes {
-            phantom_inner_type = syn::parse_quote!(& #lifetime #phantom_inner_type);
-        }
-
-        let dummy_field = dummy_field.map(|(name, tok)| quote!(#name #tok));
-        let struct_body = brackets(quote!(
-            #dummy_fields,
-            #dummy_field ::core::marker::PhantomData<#phantom_inner_type>,
-        ));
-        let struct_construct = brackets(quote!(
-            #names,
-            #dummy_field ::core::marker::PhantomData,
-        ));
+        let struct_body = brackets(quote!(#dummy_fields));
         let variant_bindings = brackets(quote!(#names));
 
-        let out = syn::parse_quote!(
+        let (dummy_impl_generics, dummy_ty_generics, _) = dummy_generics.split_for_impl();
+
+        let where_clause_builder;
+        let dummy_where_clause = {
+            where_clause_builder = WhereClauseBuilder::new(&dummy_generics);
+
+            where_clause_builder.with_bound(quote!(::autoproto::ProtoEncode))
+        };
+
+        syn::parse_quote!(
             Self::#ident #variant_bindings => {
-                #[derive(Debug, ::autoproto::ProtoEncode)]
+                #[derive(::autoproto::ProtoEncode)]
                 struct #ident #dummy_generics #struct_body #semicolon
+
+                impl #dummy_impl_generics ::autoproto::IsDefault for #ident #dummy_ty_generics
+                #dummy_where_clause
+                {
+                    fn is_default(&self) -> bool {
+                        ::autoproto::generic::protostruct::is_default(self)
+                    }
+                }
+
+                let __proto_dummy_struct = #ident #variant_bindings;
 
                 (
                     ::core::num::NonZeroU32::new(#tag).unwrap(),
                     ::std::borrow::Cow::Owned(
                         ::std::boxed::Box::new(
-                            #ident :: #ty_generics #struct_construct
+                            __proto_dummy_struct
                         ) as ::std::boxed::Box<dyn ::autoproto::ProtoEncode>
                     ),
                 )
             }
-        );
-
-        eprintln!("{}", quote!(#out));
-
-        out
+        )
     }
 
-    fn make_unit_variant_get_field_arm<T: ToTokens>(ident: &Ident, tag: Lit, brackets: T) -> Arm {
+    fn make_unit_variant_get_field_arm<T: ToTokens>(ident: &Ident, tag: &Lit, brackets: T) -> Arm {
         syn::parse_quote!(
             Self::#ident #brackets => (
                 ::core::num::NonZeroU32::new(#tag).unwrap(),
@@ -365,7 +386,7 @@ fn try_derive_oneof(
 
     fn make_newtype_variant_get_field_arm<F, T>(
         ident: &Ident,
-        tag: Lit,
+        tag: &Lit,
         field_name: Ident,
         brackets: F,
     ) -> Arm
@@ -385,12 +406,10 @@ fn try_derive_oneof(
 
     fn make_variant_get_field_arm(
         ident: &Ident,
-        tag: Lit,
+        tag: &Lit,
         generics: &Generics,
         fields: &Fields,
     ) -> Arm {
-        let phantom_name = Ident::new("__proto_dummy_marker", Span::call_site());
-
         match &fields {
             Fields::Named(FieldsNamed { named: fields, .. }) => match fields.len() {
                 0 => make_unit_variant_get_field_arm(ident, tag, quote!({})),
@@ -408,7 +427,6 @@ fn try_derive_oneof(
                     generics,
                     |val| quote!( { #val } ),
                     None,
-                    Some((phantom_name, Default::default())),
                     fields,
                 ),
             },
@@ -427,11 +445,247 @@ fn try_derive_oneof(
                     generics,
                     |val| quote!( ( #val ) ),
                     Some(Default::default()),
-                    None,
                     fields,
                 ),
             },
             Fields::Unit => make_unit_variant_get_field_arm(ident, tag, quote!()),
+        }
+    }
+
+    fn make_variant_exec_merge_arm_with_fields<F, T, FIter>(
+        ident: &Ident,
+        tag: &Lit,
+        generics: &Generics,
+        mut brackets: F,
+        semicolon: Option<Token!(;)>,
+        fields: &FIter,
+    ) -> Arm
+    where
+        F: FnMut(TokenStream2) -> T,
+        T: ToTokens,
+        for<'a> &'a FIter: IntoIterator<Item = &'a Field>,
+    {
+        let names = fields
+            .into_iter()
+            .enumerate()
+            .map(|(i, field)| {
+                field
+                    .ident
+                    .clone()
+                    .unwrap_or_else(|| Ident::new(&format!("__field_{}", i), Span::call_site()))
+            })
+            .collect::<Punctuated<_, Token!(,)>>();
+
+        let (typarams, dummy_fields): (Vec<Ident>, Punctuated<_, Token!(,)>) = fields
+            .into_iter()
+            .cloned()
+            .enumerate()
+            .map(|(i, field)| {
+                let tyident = Ident::new(&format!("__Ty{}", i), Span::call_site());
+                let ty = Type::Path(TypePath {
+                    qself: None,
+                    path: tyident.clone().into(),
+                });
+
+                (tyident, Field { ty, ..field })
+            })
+            .unzip();
+
+        let dummy_generics = Generics {
+            params: typarams
+                .into_iter()
+                .map(|name| GenericParam::Type(name.into()))
+                .collect(),
+            where_clause: None,
+            ..generics.clone()
+        };
+
+        let struct_body = brackets(quote!(
+            #dummy_fields,
+        ));
+        let ref_mut_construct: Stmt = {
+            let construct = names
+                .iter()
+                .map::<Expr, _>(|name| syn::parse_quote!(::autoproto::generic::RefMut(#name)))
+                .collect::<Punctuated<_, Token!(,)>>();
+            syn::parse_quote!(let (#names) = (#construct);)
+        };
+        let owned_construct: Stmt = {
+            let default: Expr = syn::parse_quote!(::core::default::Default::default());
+
+            let construct = names
+                .iter()
+                .map(|_| default.clone())
+                .collect::<Punctuated<_, Token!(,)>>();
+            syn::parse_quote!(let (#names) = (#construct);)
+        };
+        let variant_bindings = brackets(quote!(#names));
+
+        let (dummy_impl_generics, dummy_ty_generics, _) = dummy_generics.split_for_impl();
+
+        let where_clause_builder = WhereClauseBuilder::new(&dummy_generics);
+        let is_default_where_clause =
+            where_clause_builder.with_bound(quote!(::autoproto::ProtoEncode));
+        let clear_where_clause = where_clause_builder.with_bound(quote!(::autoproto::Clear));
+
+        let deconstruct_dummy = brackets(quote!(#names));
+
+        let clear_all = Block {
+            brace_token: syn::token::Brace {
+                span: Span::call_site(),
+            },
+            stmts: names
+                .iter()
+                .map::<Stmt, _>(|name| syn::parse_quote!(::autoproto::Clear::clear(#name);))
+                .collect(),
+        };
+
+        let (dummy_struct_def, dummy_is_default_impl, dummy_clear_impl): (
+            ItemStruct,
+            ItemImpl,
+            ItemImpl,
+        ) = (
+            syn::parse_quote!(
+                #[derive(::autoproto::Proto)]
+                struct #ident #dummy_generics #struct_body #semicolon
+            ),
+            syn::parse_quote!(
+                impl #dummy_impl_generics ::autoproto::IsDefault for #ident #dummy_ty_generics
+                #is_default_where_clause
+                {
+                    fn is_default(&self) -> bool {
+                        ::autoproto::generic::protostruct::is_default(self)
+                    }
+                }
+            ),
+            syn::parse_quote!(
+                impl #dummy_impl_generics ::autoproto::Clear for #ident #dummy_ty_generics
+                #clear_where_clause
+                {
+                    fn clear(&mut self)  {
+                        let Self #deconstruct_dummy = self;
+
+                        #clear_all
+                    }
+                }
+            ),
+        );
+
+        syn::parse_quote!(
+            #tag => {
+                #dummy_struct_def
+
+                #dummy_is_default_impl
+
+                #dummy_clear_impl
+
+                match self {
+                    Self :: #ident #variant_bindings => {
+                        #ref_mut_construct
+
+                        let mut __proto_dummy_struct = #ident #variant_bindings;
+
+                        func(&mut __proto_dummy_struct)
+                    }
+                    _ => {
+                        #owned_construct
+
+                        let mut __proto_dummy_struct = #ident #variant_bindings;
+
+                        let out = func(&mut __proto_dummy_struct);
+
+                        let #ident #deconstruct_dummy = __proto_dummy_struct;
+
+                        *self = Self::#ident #variant_bindings;
+
+                        out
+                    }
+                }
+            }
+        )
+    }
+
+    fn make_unit_variant_exec_merge_arm(tag: &Lit) -> Arm {
+        syn::parse_quote!(
+            #tag => func(&mut ())
+        )
+    }
+
+    fn make_newtype_variant_exec_merge_arm<F, T>(
+        ident: &Ident,
+        tag: &Lit,
+        field_name: Option<Ident>,
+        brackets: F,
+    ) -> Arm
+    where
+        F: FnOnce(TokenStream2) -> T,
+        T: ToTokens,
+    {
+        let name = Ident::new("__proto_new_inner", Span::call_site());
+
+        let field_spec = field_name.map(|name| quote!(#name :));
+
+        let construct_variant = brackets(quote!(#field_spec #name));
+
+        syn::parse_quote!(
+            #tag => {
+                let mut #name = Default::default();
+
+                let out = func(&mut #name);
+
+                *self = Self::#ident #construct_variant;
+
+                out
+            }
+        )
+    }
+
+    fn make_variant_exec_merge_arm(
+        ident: &Ident,
+        tag: &Lit,
+        generics: &Generics,
+        fields: &Fields,
+    ) -> Arm {
+        match &fields {
+            Fields::Named(FieldsNamed { named: fields, .. }) => match fields.len() {
+                0 => make_unit_variant_exec_merge_arm(tag),
+                1 => {
+                    let field_name = fields
+                        .first()
+                        .and_then(|field| field.ident.clone())
+                        .expect("Programmer error: names array should have one named element");
+
+                    make_newtype_variant_exec_merge_arm(
+                        ident,
+                        tag,
+                        Some(field_name),
+                        |f| quote!( { #f } ),
+                    )
+                }
+                _ => make_variant_exec_merge_arm_with_fields(
+                    ident,
+                    tag,
+                    generics,
+                    |val| quote!( { #val } ),
+                    None,
+                    fields,
+                ),
+            },
+            Fields::Unnamed(FieldsUnnamed {
+                unnamed: fields, ..
+            }) => match fields.len() {
+                0 => make_unit_variant_exec_merge_arm(tag),
+                1 => make_newtype_variant_exec_merge_arm(ident, tag, None, |f| quote!( ( #f ) )),
+                _ => make_variant_exec_merge_arm_with_fields(
+                    ident,
+                    tag,
+                    generics,
+                    |val| quote!( ( #val ) ),
+                    Some(Default::default()),
+                    fields,
+                ),
+            },
+            Fields::Unit => make_unit_variant_exec_merge_arm(tag),
         }
     }
 
@@ -441,30 +695,35 @@ fn try_derive_oneof(
         .enumerate()
         .map(|(i, variant)| {
             let attributes = FieldAttributes::new(&variant.attrs)?;
+            let tag = attributes
+                .tag
+                .unwrap_or_else(|| NonZeroU32::new(i as u32 + 1).unwrap());
+            let tag: Lit = LitInt::new(&tag.get().to_string(), Span::call_site()).into();
 
-            Ok((
-                attributes
-                    .tag
-                    .unwrap_or_else(|| NonZeroU32::new(i as u32 + 1).unwrap()),
-                variant,
-            ))
+            Ok((tag, variant))
         })
         .collect::<Result<Vec<_>>>()?;
 
-    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    let (impl_generics, ty_generics, _) = generics.split_for_impl();
 
     let variant_get_field: Vec<Arm> = variants
         .iter()
         .map::<Arm, _>(|(tag, variant)| {
-            let tag: Lit = LitInt::new(&tag.get().to_string(), Span::call_site()).into();
-
             make_variant_get_field_arm(&variant.ident, tag, generics, &variant.fields)
         })
         .collect();
 
-    let make_where_clause = make_where_clause_fn(generics, where_clause);
+    let variant_exec_merge: Vec<Arm> = variants
+        .iter()
+        .map::<Arm, _>(|(tag, variant)| {
+            make_variant_exec_merge_arm(&variant.ident, tag, generics, &variant.fields)
+        })
+        .chain(iter::once(
+            syn::parse_quote!(_ => { return ::core::option::Option::<T>::None; }),
+        ))
+        .collect();
 
-    let protooneof_where_clause = make_where_clause(quote!(::autoproto::Proto));
+    let mut where_clause_builder = WhereClauseBuilder::new(generics);
 
     let get_variant = ExprMatch {
         attrs: vec![],
@@ -474,9 +733,17 @@ fn try_derive_oneof(
         arms: variant_get_field,
     };
 
-    let message_where_clause = make_where_clause(quote!(
-        ::core::default::Default
-            + ::autoproto::Proto
+    let exec_merge = ExprMatch {
+        attrs: vec![],
+        match_token: Default::default(),
+        expr: syn::parse_quote!(::core::num::NonZeroU32::get(tag)),
+        brace_token: Default::default(),
+        arms: variant_exec_merge,
+    };
+
+    let message_where_clause = where_clause_builder.with_self_bound(quote!(
+        ::autoproto::ProtoOneof
+            + ::autoproto::Clear
             + ::core::fmt::Debug
             + ::core::marker::Send
             + ::core::marker::Sync
@@ -488,20 +755,30 @@ fn try_derive_oneof(
         Some(&message_where_clause),
     );
 
-    let proto_impl =
-        impl_proto_for_message(ident, &impl_generics, &ty_generics, &make_where_clause);
+    let proto_impl = impl_proto_for_message(
+        ident,
+        &impl_generics,
+        &ty_generics,
+        &mut where_clause_builder,
+    );
+
+    let protooneof_where_clause = where_clause_builder.with_bound(quote!(
+        ::core::default::Default + ::autoproto::Proto + ::autoproto::Clear
+    ));
 
     Ok(quote!(
-        impl #impl_generics ::autoproto::ProtoOneof for #ident #ty_generics #protooneof_where_clause {
+        impl #impl_generics ::autoproto::ProtoOneof for #ident #ty_generics
+        #protooneof_where_clause
+        {
             fn variant(&self) -> (::core::num::NonZeroU32, ::std::borrow::Cow<'_, dyn ::autoproto::ProtoEncode>) {
                 #get_variant
             }
 
-            fn exec_merge<F, T>(&mut self, tag: ::core::num::NonZeroU32, func: F) -> Option<T>
+            fn exec_merge<F, T>(&mut self, tag: ::core::num::NonZeroU32, mut func: F) -> Option<T>
             where
                 F: FnMut(&mut dyn ::autoproto::Proto) -> T
             {
-                todo!()
+                ::core::option::Option::<T>::Some(#exec_merge)
             }
         }
 
@@ -511,50 +788,15 @@ fn try_derive_oneof(
     ))
 }
 
-fn make_where_clause_fn(
-    generics: &Generics,
-    where_clause: Option<&WhereClause>,
-) -> impl Fn(TokenStream2) -> WhereClause {
-    let type_params = generics
-        .params
-        .iter()
-        .filter_map(|p| match p {
-            GenericParam::Type(t) => Some(t),
-            _ => None,
-        })
-        .map(|t| t.ident.clone())
-        .collect::<Vec<_>>();
-    let where_clause = where_clause
-        .map(WhereClause::clone)
-        .unwrap_or_else(|| WhereClause {
-            where_token: Default::default(),
-            predicates: Punctuated::new(),
-        });
-
-    move |bound| {
-        let mut where_clause = where_clause.clone();
-
-        where_clause.predicates.extend(
-            type_params
-                .iter()
-                .map::<WherePredicate, _>(|bounded_type| syn::parse_quote!(#bounded_type: #bound)),
-        );
-
-        where_clause
-    }
-}
-
 fn try_derive_protostruct<'a>(
     fields: impl ExactSizeIterator<Item = &'a Field>,
     ident: &Ident,
     generics: &Generics,
     mode: DeriveMode,
 ) -> Result<TokenStream2> {
-    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    let (impl_generics, ty_generics, _) = generics.split_for_impl();
 
     let num_fields = fields.len();
-
-    let make_where_clause = make_where_clause_fn(generics, where_clause);
 
     let fields: Result<Vec<(NonZeroU32, Member)>> = fields
         .enumerate()
@@ -604,8 +846,14 @@ fn try_derive_protostruct<'a>(
         .chain(iter::once(syn::parse_quote!({ None })))
         .collect();
 
-    let protostruct_where_clause = make_where_clause(quote!(::autoproto::ProtoEncode));
-    let protostructmut_where_clause = make_where_clause(quote!(::autoproto::Proto));
+    let where_clause_builder = WhereClauseBuilder::new(generics);
+
+    let protostruct_where_clause = where_clause_builder
+        .with_bound(quote!(::autoproto::ProtoEncode))
+        .with_self_bound(quote!(::autoproto::IsDefault));
+    let protostructmut_where_clause = where_clause_builder
+        .with_bound(quote!(::autoproto::Proto))
+        .with_self_bound(quote!(::autoproto::ProtoStruct));
 
     let immut: ItemImpl = syn::parse_quote! {
         impl #impl_generics ::autoproto::ProtoStruct for #ident #ty_generics #protostruct_where_clause {
@@ -622,7 +870,9 @@ fn try_derive_protostruct<'a>(
     let mutable: Option<ItemImpl> = match mode {
         DeriveMode::ImmutableOnly => None,
         DeriveMode::ImmutableAndMutable => Some(syn::parse_quote! {
-            impl #impl_generics ::autoproto::ProtoStructMut for #ident #ty_generics #protostructmut_where_clause {
+            impl #impl_generics ::autoproto::ProtoStructMut for #ident #ty_generics
+            #protostructmut_where_clause
+            {
                 fn field_mut(&mut self, tag: ::core::num::NonZeroU32) -> Option<&mut dyn ::autoproto::Proto> {
                     #get_field_mut
                 }
@@ -637,7 +887,7 @@ fn try_derive_protostruct<'a>(
     })
 }
 
-fn try_derive_struct(
+fn try_derive_proto_for_struct(
     attrs: &[Attribute],
     ident: &Ident,
     generics: &Generics,
@@ -647,7 +897,7 @@ fn try_derive_struct(
 
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
-    let make_where_clause = make_where_clause_fn(generics, where_clause);
+    let mut where_clause_builder = WhereClauseBuilder::new(generics);
 
     if attrs.transparent {
         let inner_field = match data {
@@ -682,144 +932,242 @@ fn try_derive_struct(
             .map(Member::Named)
             .unwrap_or_else(|| Member::Unnamed(0.into()));
 
-        let (protoencode_impl, proto_impl, message_impl, is_default_impl) = (
+        let mut where_clause_builder = WhereClauseBuilder::new(generics);
+
+        let (protoencode_impl, proto_impl) = (
             newtype::protoencode(
                 ident,
                 &field,
                 &impl_generics,
                 &ty_generics,
-                &make_where_clause,
+                &mut where_clause_builder,
             ),
             newtype::proto(
                 ident,
                 &field,
                 &impl_generics,
                 &ty_generics,
-                &make_where_clause,
+                &mut where_clause_builder,
+            ),
+        );
+
+        Ok(quote! {
+            #protoencode_impl
+            #proto_impl
+        })
+    } else {
+        match data {
+            DataStruct {
+                fields: Fields::Named(FieldsNamed { named: fields, .. }),
+                ..
+            }
+            | DataStruct {
+                fields:
+                    Fields::Unnamed(FieldsUnnamed {
+                        unnamed: fields, ..
+                    }),
+                ..
+            } => {
+                if fields.is_empty() {
+                    Ok(unit_proto_impl(
+                        ident,
+                        impl_generics,
+                        ty_generics,
+                        where_clause,
+                    ))
+                } else {
+                    let protostruct_impl = try_derive_protostruct(
+                        fields.into_iter(),
+                        ident,
+                        generics,
+                        Default::default(),
+                    )?;
+
+                    let proto_impl = impl_proto_for_protostruct(
+                        ident,
+                        &impl_generics,
+                        &ty_generics,
+                        &mut where_clause_builder,
+                    );
+
+                    Ok(quote!(
+                        #protostruct_impl
+
+                        #proto_impl
+                    ))
+                }
+            }
+            DataStruct {
+                fields: Fields::Unit,
+                ..
+            } => Ok(unit_proto_impl(
+                ident,
+                impl_generics,
+                ty_generics,
+                where_clause,
+            )),
+        }
+    }
+}
+
+fn try_derive_message_for_struct(
+    attrs: &[Attribute],
+    ident: &Ident,
+    generics: &Generics,
+    data: &DataStruct,
+) -> Result<TokenStream2> {
+    let attrs = MessageAttributes::new(attrs)?;
+
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+
+    let mut where_clause_builder = WhereClauseBuilder::new(generics);
+
+    if attrs.transparent {
+        let inner_field = match data {
+            DataStruct {
+                fields: Fields::Named(FieldsNamed { named: fields, .. }),
+                ..
+            }
+            | DataStruct {
+                fields:
+                    Fields::Unnamed(FieldsUnnamed {
+                        unnamed: fields, ..
+                    }),
+                ..
+            } => {
+                if fields.len() != 1 {
+                    bail!("`transparent` message must have exactly one field");
+                }
+
+                fields.first().ok_or_else(|| anyhow!("Programmer error"))?
+            }
+            DataStruct {
+                fields: Fields::Unit,
+                ..
+            } => {
+                bail!("Cannot have a `transparent` message without fields");
+            }
+        };
+
+        let field: Member = inner_field
+            .ident
+            .clone()
+            .map(Member::Named)
+            .unwrap_or_else(|| Member::Unnamed(0.into()));
+
+        let mut where_clause_builder = WhereClauseBuilder::new(generics);
+
+        let (protoencode_impl, proto_impl, message_impl) = (
+            newtype::protoencode(
+                ident,
+                &field,
+                &impl_generics,
+                &ty_generics,
+                &mut where_clause_builder,
+            ),
+            newtype::proto(
+                ident,
+                &field,
+                &impl_generics,
+                &ty_generics,
+                &mut where_clause_builder,
             ),
             newtype::message(
                 ident,
                 &field,
                 &impl_generics,
                 &ty_generics,
-                &make_where_clause,
-            ),
-            newtype::is_default(
-                ident,
-                &field,
-                &impl_generics,
-                &ty_generics,
-                &make_where_clause,
+                &mut where_clause_builder,
             ),
         );
 
-        return Ok(quote! {
+        Ok(quote! {
             #protoencode_impl
             #proto_impl
             #message_impl
-            #is_default_impl
-        });
-    }
-
-    match data {
-        DataStruct {
-            fields: Fields::Named(FieldsNamed { named: fields, .. }),
-            ..
-        }
-        | DataStruct {
-            fields:
-                Fields::Unnamed(FieldsUnnamed {
-                    unnamed: fields, ..
-                }),
-            ..
-        } => {
-            if fields.is_empty() {
-                Ok(unit_proto_impl(
-                    ident,
-                    impl_generics,
-                    ty_generics,
-                    where_clause,
-                ))
-            } else {
-                let protostruct_impl = try_derive_protostruct(
-                    fields.into_iter(),
-                    ident,
-                    generics,
-                    Default::default(),
-                )?;
-
-                let is_default_where_clause = make_where_clause(quote!(::autoproto::ProtoEncode));
-                let is_default_impl = impl_is_default_for_protostruct(
-                    ident,
-                    &impl_generics,
-                    &ty_generics,
-                    Some(&is_default_where_clause),
-                );
-
-                let message_where_clause = make_where_clause(quote!(
-                    ::core::default::Default
-                        + ::autoproto::Proto
-                        + ::core::fmt::Debug
-                        + ::core::marker::Send
-                        + ::core::marker::Sync
-                ));
-                let message_impl = impl_message_for_protostruct(
-                    ident,
-                    &impl_generics,
-                    &ty_generics,
-                    Some(&message_where_clause),
-                );
-
-                let proto_impl =
-                    impl_proto_for_message(ident, &impl_generics, &ty_generics, &make_where_clause);
-
-                Ok(quote!(
-                    #protostruct_impl
-
-                    #is_default_impl
-
-                    #message_impl
-
-                    #proto_impl
-                ))
+        })
+    } else {
+        match data {
+            DataStruct {
+                fields: Fields::Named(FieldsNamed { named: fields, .. }),
+                ..
             }
+            | DataStruct {
+                fields:
+                    Fields::Unnamed(FieldsUnnamed {
+                        unnamed: fields, ..
+                    }),
+                ..
+            } => {
+                if fields.is_empty() {
+                    Ok(unit_proto_impl(
+                        ident,
+                        impl_generics,
+                        ty_generics,
+                        where_clause,
+                    ))
+                } else {
+                    let protostruct_impl = try_derive_protostruct(
+                        fields.into_iter(),
+                        ident,
+                        generics,
+                        Default::default(),
+                    )?;
+
+                    let message_where_clause = where_clause_builder.with_self_bound(quote!(
+                        ::autoproto::ProtoStructMut
+                            + ::autoproto::Clear
+                            + ::core::fmt::Debug
+                            + ::core::marker::Send
+                            + ::core::marker::Sync
+                    ));
+                    let message_impl = impl_message_for_protostruct(
+                        ident,
+                        &impl_generics,
+                        &ty_generics,
+                        Some(&message_where_clause),
+                    );
+
+                    let proto_impl = impl_proto_for_message(
+                        ident,
+                        &impl_generics,
+                        &ty_generics,
+                        &mut where_clause_builder,
+                    );
+
+                    Ok(quote!(
+                        #protostruct_impl
+
+                        #message_impl
+
+                        #proto_impl
+                    ))
+                }
+            }
+            DataStruct {
+                fields: Fields::Unit,
+                ..
+            } => Ok(unit_proto_impl(
+                ident,
+                impl_generics,
+                ty_generics,
+                where_clause,
+            )),
         }
-        DataStruct {
-            fields: Fields::Unit,
-            ..
-        } => Ok(unit_proto_impl(
-            ident,
-            impl_generics,
-            ty_generics,
-            where_clause,
-        )),
     }
 }
 
-fn impl_proto_for_message<F>(
+fn impl_proto_for_message(
     ident: &Ident,
     impl_generics: &syn::ImplGenerics,
     ty_generics: &syn::TypeGenerics,
-    make_where_clause: F,
-) -> TokenStream2
-where
-    F: Fn(TokenStream2) -> WhereClause,
-{
-    let protoencode_where_clause = make_where_clause(quote!(
-        ::core::default::Default
-            + ::autoproto::IsDefault
-            + ::autoproto::Proto
-            + ::core::fmt::Debug
-            + ::core::marker::Send
-            + ::core::marker::Sync
-    ));
-    let proto_where_clause = make_where_clause(quote!(
-        ::core::default::Default
-            + ::autoproto::IsDefault
-            + ::autoproto::Proto
-            + ::core::fmt::Debug
-            + ::core::marker::Send
-            + ::core::marker::Sync
+    where_clause_builder: &mut WhereClauseBuilder,
+) -> TokenStream2 {
+    let protoencode_where_clause = where_clause_builder
+        .build()
+        .with_self_bound(quote!(::autoproto::prost::Message + ::autoproto::IsDefault));
+    let proto_where_clause = where_clause_builder.build().with_self_bound(quote!(
+        ::autoproto::prost::Message + ::autoproto::ProtoEncode + ::autoproto::Clear
     ));
 
     quote!(
@@ -879,22 +1227,7 @@ fn impl_message_for_protooneof(
             }
 
             fn clear(&mut self) {
-                ::autoproto::generic::default::message_clear(self)
-            }
-        }
-    )
-}
-
-fn impl_is_default_for_protostruct(
-    ident: &Ident,
-    impl_generics: &syn::ImplGenerics,
-    ty_generics: &syn::TypeGenerics,
-    where_clause: Option<&syn::WhereClause>,
-) -> ItemImpl {
-    syn::parse_quote!(
-        impl #impl_generics ::autoproto::IsDefault for #ident #ty_generics #where_clause {
-            fn is_default(&self) -> bool {
-                ::autoproto::generic::protostruct::is_default(self)
+                ::autoproto::generic::clear::message_clear(self)
             }
         }
     )
@@ -931,9 +1264,38 @@ fn impl_message_for_protostruct(
             }
 
             fn clear(&mut self) {
-                ::autoproto::generic::default::message_clear(self)
+                ::autoproto::generic::clear::message_clear(self)
             }
         }
+    )
+}
+
+fn impl_proto_for_protostruct(
+    ident: &Ident,
+    impl_generics: &syn::ImplGenerics,
+    ty_generics: &syn::TypeGenerics,
+    where_clause_builder: &mut WhereClauseBuilder,
+) -> TokenStream2 {
+    let protoencode_impl =
+        impl_protoencode_for_protostruct(ident, impl_generics, ty_generics, where_clause_builder);
+    let proto_where_clause = where_clause_builder.build().with_self_bound(quote!(
+        ::autoproto::ProtoStructMut + ::autoproto::ProtoEncode + ::autoproto::Clear
+    ));
+
+    quote!(
+        impl #impl_generics ::autoproto::Proto for #ident #ty_generics #proto_where_clause
+        {
+            fn merge_self(
+                &mut self,
+                wire_type: ::autoproto::prost::encoding::WireType,
+                mut buf: &mut dyn ::autoproto::prost::bytes::Buf,
+                ctx: ::autoproto::prost::encoding::DecodeContext,
+            ) -> Result<(), ::autoproto::prost::DecodeError> {
+                ::autoproto::generic::protostruct::proto_merge_self(self, wire_type, &mut buf, ctx)
+            }
+        }
+
+        #protoencode_impl
     )
 }
 
@@ -941,25 +1303,19 @@ fn impl_protoencode_for_protostruct(
     ident: &Ident,
     impl_generics: &syn::ImplGenerics,
     ty_generics: &syn::TypeGenerics,
-    where_clause: Option<&syn::WhereClause>,
+    where_clause_builder: &mut WhereClauseBuilder,
 ) -> ItemImpl {
+    let where_clause = where_clause_builder.with_self_bound(quote!(::autoproto::ProtoStruct));
+
     syn::parse_quote!(
         impl #impl_generics ::autoproto::ProtoEncode for #ident #ty_generics #where_clause
         {
             fn encode_as_field(&self, tag: ::core::num::NonZeroU32, mut buf: &mut dyn ::autoproto::prost::bytes::BufMut) {
-                let len = ::autoproto::generic::protostruct::message_encoded_len(self);
-                let buf = &mut buf;
-
-                ::autoproto::prost::encoding::encode_key(tag.get(), ::autoproto::prost::encoding::WireType::LengthDelimited, buf);
-                ::autoproto::prost::encoding::encode_varint(len as u64, buf);
-                ::autoproto::generic::protostruct::message_encode_raw(self, buf)
+                ::autoproto::generic::protostruct::protoencode_encode_as_field(self, tag, buf)
             }
 
             fn encoded_len_as_field(&self, tag: ::core::num::NonZeroU32) -> usize {
-                let len = ::autoproto::generic::protostruct::message_encoded_len(self);
-                ::autoproto::prost::encoding::key_len(tag.get()) +
-                    ::autoproto::prost::encoding:: encoded_len_varint(len as u64) +
-                    len
+                ::autoproto::generic::protostruct::protoencode_encoded_len_as_field(self, tag)
             }
         }
     )
@@ -972,12 +1328,6 @@ fn unit_proto_impl(
     where_clause: Option<&syn::WhereClause>,
 ) -> TokenStream2 {
     quote!(
-        impl #impl_generics ::autoproto::IsDefault for #ident #ty_generics #where_clause {
-            fn is_default(&self) -> bool {
-                true
-            }
-        }
-
         impl #impl_generics ::autoproto::ProtoEncode for #ident #ty_generics #where_clause {
             fn encode_as_field(&self, tag: ::core::num::NonZeroU32, buf: &mut dyn prost::bytes::BufMut) {
                 <() as ::autoproto::ProtoEncode>::encode_as_field(&(), tag, buf)
@@ -1026,79 +1376,4 @@ fn unit_proto_impl(
             }
         }
     )
-}
-
-#[derive(Debug)]
-struct FieldAttributes {
-    tag: Option<NonZeroU32>,
-}
-
-impl FieldAttributes {
-    fn new(attrs: &[Attribute]) -> Result<Self> {
-        let mut tag = None::<NonZeroU32>;
-
-        for meta in attrs
-            .iter()
-            .filter_map(|attr| match attr.parse_meta().ok()? {
-                Meta::List(MetaList { nested: inner, .. }) => Some(inner),
-                _ => None,
-            })
-            .flatten()
-        {
-            if let NestedMeta::Meta(Meta::NameValue(inner)) = meta {
-                let ident = if let Some(ident) = inner.path.get_ident() {
-                    ident
-                } else {
-                    continue;
-                };
-
-                if ident == "tag" {
-                    tag = Some(
-                        NonZeroU32::new(match inner.lit {
-                            Lit::Str(lit) => lit.value().parse()?,
-                            Lit::Int(lit) => lit.base10_parse()?,
-                            _ => bail!("Unknown tag type"),
-                        })
-                        .ok_or_else(|| anyhow!("Tag cannot be zero"))?,
-                    );
-                }
-            }
-        }
-
-        Ok(Self { tag })
-    }
-}
-
-#[derive(Debug)]
-struct MessageAttributes {
-    transparent: bool,
-}
-
-impl MessageAttributes {
-    fn new(attrs: &[Attribute]) -> Result<Self> {
-        let mut transparent = false;
-
-        for meta in attrs
-            .iter()
-            .filter_map(|attr| match attr.parse_meta().ok()? {
-                Meta::List(MetaList { nested: inner, .. }) => Some(inner),
-                _ => None,
-            })
-            .flatten()
-        {
-            if let NestedMeta::Meta(Meta::Path(inner)) = meta {
-                let ident = if let Some(ident) = inner.get_ident() {
-                    ident
-                } else {
-                    continue;
-                };
-
-                if ident == "transparent" {
-                    transparent = true;
-                }
-            }
-        }
-
-        Ok(Self { transparent })
-    }
 }
