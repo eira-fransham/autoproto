@@ -166,7 +166,7 @@ pub mod default {
 }
 
 pub mod protooneof {
-    use crate::{Proto, ProtoEncode, ProtoOneof};
+    use crate::ProtoOneof;
     use prost::{
         bytes::{Buf, BufMut},
         encoding::{DecodeContext, WireType},

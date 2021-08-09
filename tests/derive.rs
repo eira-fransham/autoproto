@@ -400,4 +400,36 @@ mod tests {
 
         assert_eq!(prost_msg.encode_to_vec(), autoproto_msg.encode_to_vec());
     }
+
+    #[quickcheck]
+    fn repeated_messages_same_as_prost(a: Vec<(u32, u64)>, b: Vec<(f32, f64)>) {
+        #[derive(::prost::Message)]
+        struct ProstMsg {
+            #[prost(repeated, message, tag = 1)]
+            a: Vec<SomeStruct<u32, u64>>,
+            #[prost(repeated, message, tag = 2)]
+            b: Vec<Foo<f32, f64>>,
+        }
+
+        #[derive(autoproto::IsDefault, PartialEq, Default, Debug, autoproto::Message)]
+        struct AutoprotoMsg {
+            #[autoproto(tag = 1)]
+            a: Vec<SomeStruct<u32, u64>>,
+            #[autoproto(tag = 2)]
+            b: Vec<Foo<f32, f64>>,
+        }
+
+        let (a, b): (Vec<_>, Vec<_>) = (
+            a.into_iter().map(|(a, b)| SomeStruct { a, b }).collect(),
+            b.into_iter().map(|(a, b)| Foo(a, b)).collect(),
+        );
+
+        let prost_msg = ProstMsg {
+            a: a.clone(),
+            b: b.clone(),
+        };
+        let autoproto_msg = AutoprotoMsg { a, b };
+
+        assert_eq!(prost_msg.encode_to_vec(), autoproto_msg.encode_to_vec());
+    }
 }

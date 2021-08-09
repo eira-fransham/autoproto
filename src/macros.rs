@@ -77,6 +77,34 @@ macro_rules! impl_protoscalar {
         }
 
         #[allow(clippy::all)]
+        impl $crate::ProtoEncodeRepeated for $t {
+            fn encode_as_field_repeated<'a, I>(iter: I, tag: NonZeroU32, buf: &mut dyn bytes::BufMut)
+            where
+                I: ExactSizeIterator<Item = &'a Self> + Clone,
+                Self: 'a,
+            {
+                <MappedInt::<{ <$t>::DEFAULT_ENCODING }, _> as $crate::ProtoEncodeRepeated>::encode_as_field_repeated(
+                    // We need to do `&*` to make Rust correctly infer lifetimes
+                    iter.map(|i| &*MappedInt::from_ref(i)),
+                    tag,
+                    buf,
+                );
+            }
+
+            fn encoded_len_as_field_repeated<'a, I>(iter: I, tag: NonZeroU32) -> usize
+            where
+                I: ExactSizeIterator<Item = &'a Self>,
+                Self: 'a,
+            {
+                <MappedInt::<{ <$t>::DEFAULT_ENCODING }, _> as $crate::ProtoEncodeRepeated>::encoded_len_as_field_repeated(
+                    // We need to do `&*` to make Rust correctly infer lifetimes
+                    iter.map(|i| &*MappedInt::from_ref(i)),
+                    tag,
+                )
+            }
+        }
+
+        #[allow(clippy::all)]
         impl $crate::Proto for $t {
             fn merge_self(
                 &mut self,
@@ -200,7 +228,10 @@ macro_rules! impl_proto_for_protorepeated {
         $(where $($bounded : $bound,)* $($($lbounded : $lbound),*)?)?
         {
             fn is_default(&self) -> bool {
-                $crate::ProtoRepeated::iter(self).size_hint().1 == Some(0)
+                <
+                    <Self as $crate::ProtoRepeated>::Iter<'_>
+                    as std::iter::ExactSizeIterator
+                >::len(&$crate::ProtoRepeated::iter(self)) == 0
             }
         }
 
@@ -208,13 +239,24 @@ macro_rules! impl_proto_for_protorepeated {
         $(where $($bounded : $bound,)* $($($lbounded : $lbound),*)?)?
         {
             fn encode_as_field(&self, tag: ::core::num::NonZeroU32, buf: &mut dyn $crate::prost::bytes::BufMut) {
-                for i in self.iter() {
-                    i.encode_as_field(tag, buf);
+                if !$crate::IsDefault::is_default(self) {
+                    <<Self as $crate::ProtoRepeated>::Item as $crate::ProtoEncodeRepeated>::encode_as_field_repeated(
+                        <Self as $crate::ProtoRepeated>::iter(self),
+                        tag,
+                        buf,
+                    )
                 }
             }
 
             fn encoded_len_as_field(&self, tag: ::core::num::NonZeroU32) -> usize {
-                self.iter().map(|i| i.encoded_len_as_field(tag)).sum()
+                if $crate::IsDefault::is_default(self) {
+                    0
+                } else {
+                    <Self as ProtoRepeated>::Item::encoded_len_as_field_repeated(
+                        <Self as ProtoRepeated>::iter(self),
+                        tag,
+                    )
+                }
             }
         }
 

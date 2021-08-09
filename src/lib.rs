@@ -1,4 +1,5 @@
-#![feature(const_generics, generic_associated_types)]
+#![allow(incomplete_features)]
+#![feature(specialization, const_generics, generic_associated_types)]
 
 pub use autoproto_derive::{IsDefault, Message, Proto, ProtoEncode};
 
@@ -60,7 +61,7 @@ where
 // marker for 0 bytes). `PhantomData` should not be encoded at all. In theory we shouldn't need to
 // encode `()` either, but `prost` does and we're aiming for byte-for-byte compatibility.
 impl<T> ProtoEncode for PhantomData<T> {
-    fn encode_as_field(&self, _tag: NonZeroU32, _buf: &mut dyn prost::bytes::BufMut) {}
+    fn encode_as_field(&self, _tag: NonZeroU32, _buf: &mut dyn bytes::BufMut) {}
 
     fn encoded_len_as_field(&self, _tag: NonZeroU32) -> usize {
         0
@@ -71,7 +72,7 @@ impl<T> Proto for PhantomData<T> {
     fn merge_self(
         &mut self,
         wire_type: WireType,
-        buf: &mut dyn prost::bytes::Buf,
+        buf: &mut dyn bytes::Buf,
         ctx: DecodeContext,
     ) -> Result<(), prost::DecodeError> {
         <()>::merge_self(&mut (), wire_type, buf, ctx)
@@ -82,17 +83,55 @@ pub trait ProtoEncode: IsDefault {
     /// Encode this type _as a field_. This is different to encoding it as a message (which is
     /// what `prost::Message:encode_raw` does), as base types such as integers are encoded
     /// differently as fields vs as messages.
-    fn encode_as_field(&self, tag: NonZeroU32, buf: &mut dyn prost::bytes::BufMut);
+    fn encode_as_field(&self, tag: NonZeroU32, buf: &mut dyn bytes::BufMut);
 
     /// Get the length if this type is encoded with its field tag.
     fn encoded_len_as_field(&self, tag: NonZeroU32) -> usize;
+}
+
+pub trait ProtoEncodeRepeated: ProtoEncode {
+    fn encode_as_field_repeated<'a, I>(iter: I, tag: NonZeroU32, buf: &mut dyn bytes::BufMut)
+    where
+        I: ExactSizeIterator<Item = &'a Self> + Clone,
+        Self: 'a;
+
+    fn encoded_len_as_field_repeated<'a, I>(iter: I, tag: NonZeroU32) -> usize
+    where
+        I: ExactSizeIterator<Item = &'a Self>,
+        Self: 'a;
+}
+
+impl<T> ProtoEncodeRepeated for T
+where
+    T: ProtoEncode,
+{
+    default fn encode_as_field_repeated<'a, I>(
+        iter: I,
+        tag: NonZeroU32,
+        buf: &mut dyn bytes::BufMut,
+    ) where
+        I: Iterator<Item = &'a Self> + Clone,
+        Self: 'a,
+    {
+        for i in iter {
+            i.encode_as_field(tag, buf);
+        }
+    }
+
+    default fn encoded_len_as_field_repeated<'a, I>(iter: I, tag: NonZeroU32) -> usize
+    where
+        I: Iterator<Item = &'a Self>,
+        Self: 'a,
+    {
+        iter.map(|i| i.encoded_len_as_field(tag)).sum()
+    }
 }
 
 impl<T> ProtoEncode for &'_ T
 where
     T: ProtoEncode,
 {
-    fn encode_as_field(&self, tag: NonZeroU32, buf: &mut dyn prost::bytes::BufMut) {
+    fn encode_as_field(&self, tag: NonZeroU32, buf: &mut dyn bytes::BufMut) {
         (**self).encode_as_field(tag, buf)
     }
 
@@ -105,7 +144,7 @@ impl<T> ProtoEncode for &'_ mut T
 where
     T: ProtoEncode,
 {
-    fn encode_as_field(&self, tag: NonZeroU32, buf: &mut dyn prost::bytes::BufMut) {
+    fn encode_as_field(&self, tag: NonZeroU32, buf: &mut dyn bytes::BufMut) {
         (**self).encode_as_field(tag, buf)
     }
 
@@ -123,7 +162,7 @@ pub trait Proto: ProtoEncode + Clear {
     fn merge_self(
         &mut self,
         wire_type: WireType,
-        buf: &mut dyn prost::bytes::Buf,
+        buf: &mut dyn bytes::Buf,
         ctx: DecodeContext,
     ) -> Result<(), prost::DecodeError>;
 }
@@ -147,7 +186,7 @@ impl<T> ProtoEncode for Option<T>
 where
     T: ProtoEncode,
 {
-    fn encode_as_field(&self, tag: NonZeroU32, buf: &mut dyn prost::bytes::BufMut) {
+    fn encode_as_field(&self, tag: NonZeroU32, buf: &mut dyn bytes::BufMut) {
         match self {
             None => {}
             Some(v) => v.encode_as_field(tag, buf),
@@ -169,7 +208,7 @@ where
     fn merge_self(
         &mut self,
         wire_type: WireType,
-        buf: &mut dyn prost::bytes::Buf,
+        buf: &mut dyn bytes::Buf,
         ctx: DecodeContext,
     ) -> Result<(), prost::DecodeError> {
         let mut cur = self.take().unwrap_or_default();
@@ -226,27 +265,44 @@ where
 
 pub trait ProtoRepeated: Extend<Self::Item> {
     type Item: Proto;
-    type Iter<'a>: Iterator<Item = &'a Self::Item> + 'a
+    type Iter<'a>: ExactSizeIterator<Item = &'a Self::Item> + 'a
     where
         Self: 'a;
 
     fn iter(&self) -> Self::Iter<'_>;
 }
 
+pub trait IntoExactSizeIterator: IntoIterator {
+    type IntoExactSizeIter: ExactSizeIterator<Item = Self::Item>;
+
+    fn into_exact_size_iter(self) -> Self::IntoExactSizeIter;
+}
+
+impl<T> IntoExactSizeIterator for T
+where
+    T: IntoIterator,
+    T::IntoIter: ExactSizeIterator,
+{
+    type IntoExactSizeIter = <T as IntoIterator>::IntoIter;
+    fn into_exact_size_iter(self) -> Self::IntoExactSizeIter {
+        self.into_iter()
+    }
+}
+
 impl<T, Item> ProtoRepeated for T
 where
     T: Extend<Item>,
     Item: Proto,
-    for<'a> &'a T: IntoIterator<Item = &'a Item>,
+    for<'a> &'a T: IntoExactSizeIterator<Item = &'a Item>,
 {
     type Item = Item;
     type Iter<'a>
     where
         Self: 'a,
-    = <&'a T as IntoIterator>::IntoIter;
+    = <&'a T as IntoExactSizeIterator>::IntoExactSizeIter;
 
     fn iter(&self) -> Self::Iter<'_> {
-        self.into_iter()
+        self.into_exact_size_iter()
     }
 }
 
@@ -332,7 +388,7 @@ impl From<Fixed> for WireType {
 impl Fixed {
     fn read<B>(&self, buf: &mut B) -> Value
     where
-        B: prost::bytes::Buf + ?Sized,
+        B: bytes::Buf + ?Sized,
     {
         match self {
             Self::Float => Value::Float(buf.get_f32_le() as f64),
@@ -346,7 +402,7 @@ impl Fixed {
 
     fn write<B>(&self, value: Value, buf: &mut B)
     where
-        B: prost::bytes::BufMut + ?Sized,
+        B: bytes::BufMut + ?Sized,
     {
         match (self, value) {
             (Self::Float, Value::Float(f)) => buf.put_f32_le(f as _),
@@ -359,18 +415,15 @@ impl Fixed {
         }
     }
 
-    fn encoded_len(&self, tag: NonZeroU32, value: Value) -> usize {
-        use prost::encoding::*;
-
-        match (self, value) {
-            (Self::Float, Value::Float(f)) => float::encoded_len(tag.get(), &(f as f32)),
-            (Self::Double, Value::Float(f)) => double::encoded_len(tag.get(), &(f as f64)),
-            (Self::Fixed32, Value::Int(i)) => fixed32::encoded_len(tag.get(), &(i as u32)),
-            (Self::Fixed64, Value::Int(i)) => fixed64::encoded_len(tag.get(), &(i as u64)),
-            (Self::SFixed32, Value::Int(i)) => sfixed32::encoded_len(tag.get(), &(i as i32)),
-            (Self::SFixed64, Value::Int(i)) => sfixed64::encoded_len(tag.get(), &(i as i64)),
-            _ => panic!("Invalid encoding"),
+    fn width(&self) -> usize {
+        match self {
+            Self::Float | Self::Fixed32 | Self::SFixed32 => 4,
+            Self::Double | Self::Fixed64 | Self::SFixed64 => 8,
         }
+    }
+
+    fn encoded_len(&self, tag: NonZeroU32) -> usize {
+        prost::encoding::key_len(tag.get()) + self.width()
     }
 }
 
@@ -429,18 +482,12 @@ impl Varint {
         }
     }
 
-    fn encoded_len(&self, tag: NonZeroU32, value: Value) -> usize {
-        use prost::encoding::*;
+    fn width(&self, value: Value) -> usize {
+        prost::encoding::encoded_len_varint(self.make_u64_varint(value))
+    }
 
-        match (self, value) {
-            (Self::I32, Value::Int(i)) => int32::encoded_len(tag.get(), &(i as i32)),
-            (Self::I64, Value::Int(i)) => int64::encoded_len(tag.get(), &(i as i64)),
-            (Self::SI32, Value::Int(i)) => sint32::encoded_len(tag.get(), &(i as i32)),
-            (Self::SI64, Value::Int(i)) => sint64::encoded_len(tag.get(), &(i as i64)),
-            (Self::U32, Value::Int(i)) => uint32::encoded_len(tag.get(), &(i as u32)),
-            (Self::U64, Value::Int(i)) => uint64::encoded_len(tag.get(), &(i as u64)),
-            _ => panic!("Invalid encoding"),
-        }
+    fn encoded_len(&self, tag: NonZeroU32, value: Value) -> usize {
+        prost::encoding::key_len(tag.get()) + self.width(value)
     }
 }
 
@@ -448,6 +495,7 @@ impl Varint {
 pub struct ScalarEncoding {
     pub default: Option<i128>,
     pub kind: ScalarEncodingKind,
+    pub packed: bool,
 }
 
 impl ScalarEncoding {
@@ -455,6 +503,7 @@ impl ScalarEncoding {
         Self {
             default: None,
             kind,
+            packed: true,
         }
     }
 }
@@ -489,7 +538,44 @@ impl From<Fixed> for ScalarEncodingKind {
 }
 
 #[derive(Debug, Copy, Clone)]
+#[repr(transparent)]
 pub struct MappedInt<const ENCODING: ScalarEncoding, T>(pub T);
+
+impl<const ENCODING: ScalarEncoding, T> MappedInt<ENCODING, T> {
+    pub fn new(inner: T) -> Self {
+        Self(inner)
+    }
+
+    pub fn from_ref(v: &T) -> &Self {
+        // Safe due to `repr(transparent)`
+        unsafe { std::mem::transmute(v) }
+    }
+
+    pub fn from_mut(v: &mut T) -> &mut Self {
+        // Safe due to `repr(transparent)`
+        unsafe { std::mem::transmute(v) }
+    }
+}
+
+impl<const ENCODING: ScalarEncoding, T> MappedInt<ENCODING, T>
+where
+    T: ProtoScalar,
+{
+    fn packed_len<'a, I>(iter: I) -> usize
+    where
+        I: ExactSizeIterator<Item = &'a Self>,
+        Self: 'a,
+    {
+        match ENCODING.kind {
+            ScalarEncodingKind::Varint(varint) => iter
+                .map(|i| varint.unwrap_or(T::DEFAULT_VARINT).width(i.0.to_value()))
+                .sum(),
+            ScalarEncodingKind::Fixed(fixed) => {
+                fixed.unwrap_or(T::DEFAULT_FIXED).width() * iter.len()
+            }
+        }
+    }
+}
 
 impl<const ENCODING: ScalarEncoding, T> Clear for MappedInt<ENCODING, T>
 where
@@ -497,6 +583,64 @@ where
 {
     fn clear(&mut self) {
         self.0.clear()
+    }
+}
+
+impl<const ENCODING: ScalarEncoding, T> ProtoEncodeRepeated for MappedInt<ENCODING, T>
+where
+    T: IsDefault + ProtoScalar,
+{
+    fn encode_as_field_repeated<'a, I>(iter: I, tag: NonZeroU32, mut buf: &mut dyn bytes::BufMut)
+    where
+        I: ExactSizeIterator<Item = &'a Self> + Clone,
+        Self: 'a,
+    {
+        if ENCODING.packed {
+            let len = Self::packed_len(iter.clone());
+
+            prost::encoding::encode_key(tag.get(), WireType::LengthDelimited, &mut buf);
+            prost::encoding::encode_varint(len as u64, &mut buf);
+
+            match ENCODING.kind {
+                ScalarEncodingKind::Varint(varint) => {
+                    let varint = varint.unwrap_or(T::DEFAULT_VARINT);
+
+                    for value in iter {
+                        prost::encoding::encode_varint(
+                            varint.make_u64_varint(value.0.to_value()),
+                            &mut buf,
+                        );
+                    }
+                }
+                ScalarEncodingKind::Fixed(fixed) => {
+                    let fixed = fixed.unwrap_or(T::DEFAULT_FIXED);
+
+                    for value in iter {
+                        fixed.write(value.0.to_value(), buf)
+                    }
+                }
+            }
+        } else {
+            for i in iter {
+                i.encode_as_field(tag, buf);
+            }
+        }
+    }
+
+    fn encoded_len_as_field_repeated<'a, I>(iter: I, tag: NonZeroU32) -> usize
+    where
+        I: ExactSizeIterator<Item = &'a Self>,
+        Self: 'a,
+    {
+        if ENCODING.packed {
+            let len = Self::packed_len(iter);
+
+            prost::encoding::key_len(tag.get())
+                + prost::encoding::encoded_len_varint(len as u64)
+                + len
+        } else {
+            iter.map(|i| i.encoded_len_as_field(tag)).sum()
+        }
     }
 }
 
@@ -516,7 +660,7 @@ impl<const ENCODING: ScalarEncoding, T> ProtoEncode for MappedInt<ENCODING, T>
 where
     T: ProtoScalar,
 {
-    fn encode_as_field(&self, tag: NonZeroU32, mut buf: &mut dyn prost::bytes::BufMut) {
+    fn encode_as_field(&self, tag: NonZeroU32, mut buf: &mut dyn bytes::BufMut) {
         if !self.0.is_default() {
             match ENCODING.kind {
                 ScalarEncodingKind::Varint(varint) => {
@@ -547,9 +691,9 @@ where
                 ScalarEncodingKind::Varint(varint) => varint
                     .unwrap_or(T::DEFAULT_VARINT)
                     .encoded_len(tag, self.0.to_value()),
-                ScalarEncodingKind::Fixed(fixed) => fixed
-                    .unwrap_or(T::DEFAULT_FIXED)
-                    .encoded_len(tag, self.0.to_value()),
+                ScalarEncodingKind::Fixed(fixed) => {
+                    fixed.unwrap_or(T::DEFAULT_FIXED).encoded_len(tag)
+                }
             }
         }
     }
@@ -562,7 +706,7 @@ where
     fn merge_self(
         &mut self,
         wire_type: WireType,
-        mut buf: &mut dyn prost::bytes::Buf,
+        mut buf: &mut dyn bytes::Buf,
         _ctx: DecodeContext,
     ) -> Result<(), prost::DecodeError> {
         self.0 = match ENCODING.kind {
@@ -645,7 +789,7 @@ impl_protoscalar!(
 );
 
 impl_proto_for_message!(impl Proto for ());
-impl_proto_for_message!(impl Proto for prost::bytes::Bytes);
+impl_proto_for_message!(impl Proto for bytes::Bytes);
 impl_proto_for_message!(impl Proto for String);
 
 impl_proto_for_protomap!(
