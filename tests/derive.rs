@@ -373,4 +373,31 @@ mod tests {
 
         assert_eq!(oneof.encode_to_vec(), prost.encode_to_vec());
     }
+
+    #[quickcheck]
+    fn repeated_ints_same_as_prost(u32s: Vec<u32>, u64s: Vec<u64>) {
+        #[derive(::prost::Message)]
+        struct ProstMsg {
+            #[prost(repeated, uint32, tag = 1)]
+            u32s: Vec<u32>,
+            #[prost(repeated, uint64, tag = 2)]
+            u64s: Vec<u64>,
+        }
+
+        #[derive(autoproto::IsDefault, PartialEq, Default, Debug, autoproto::Message)]
+        struct AutoprotoMsg {
+            #[autoproto(tag = 1)]
+            u32s: Vec<u32>,
+            #[autoproto(tag = 2)]
+            u64s: Vec<u64>,
+        }
+
+        let prost_msg = ProstMsg {
+            u32s: u32s.clone(),
+            u64s: u64s.clone(),
+        };
+        let autoproto_msg = AutoprotoMsg { u32s, u64s };
+
+        assert_eq!(prost_msg.encode_to_vec(), autoproto_msg.encode_to_vec());
+    }
 }
