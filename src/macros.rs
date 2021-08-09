@@ -250,7 +250,7 @@ macro_rules! impl_proto_for_protorepeated {
             fn is_default(&self) -> bool {
                 <
                     <Self as $crate::ProtoRepeated>::Iter<'_>
-                    as std::iter::ExactSizeIterator
+                        as std::iter::ExactSizeIterator
                 >::len(&$crate::ProtoRepeated::iter(self)) == 0
             }
         }

@@ -1,31 +1,19 @@
 #![feature(generic_associated_types, trivial_bounds)]
 #![allow(dead_code)]
 
-#[derive(Copy, Clone, PartialEq, autoproto::IsDefault, Default, Debug, autoproto::Message)]
+#[derive(Copy, Clone, PartialEq, Default, Debug, autoproto::Message)]
 struct Unit;
 
-#[derive(
-    Hash,
-    Copy,
-    Clone,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    autoproto::IsDefault,
-    Default,
-    Debug,
-    autoproto::Message,
-)]
+#[derive(Hash, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Default, Debug, autoproto::Message)]
 struct Foo<A, B>(#[autoproto(tag = 4)] A, #[autoproto(tag = 5)] B);
 
-#[derive(Copy, Clone, PartialEq, autoproto::IsDefault, Default, Debug, autoproto::Message)]
+#[derive(Copy, Clone, PartialEq, Default, Debug, autoproto::Message)]
 struct SomeStruct<A, B> {
     a: A,
     b: B,
 }
 
-#[derive(Copy, Clone, PartialEq, autoproto::IsDefault, Default, Debug, autoproto::Message)]
+#[derive(Copy, Clone, PartialEq, Default, Debug, autoproto::Message)]
 #[autoproto(transparent)]
 struct Wrapper(SomeStruct<Foo<u32, u64>, SomeStruct<f32, Unit>>);
 
@@ -49,15 +37,6 @@ enum Oneof<A: DummyOne, B: DummyTwo, C: DummyThree> {
 impl<A: DummyOne, B: DummyTwo, C: DummyThree> Default for Oneof<A, B, C> {
     fn default() -> Self {
         Self::Nothing
-    }
-}
-
-impl<A: DummyOne, B: DummyTwo, C: DummyThree> autoproto::IsDefault for Oneof<A, B, C> {
-    fn is_default(&self) -> bool {
-        match self {
-            Self::Nothing => true,
-            _ => false,
-        }
     }
 }
 
@@ -254,16 +233,6 @@ mod tests {
         }
     }
 
-    impl autoproto::IsDefault for Oneof {
-        fn is_default(&self) -> bool {
-            if let Self::Nothing = self {
-                true
-            } else {
-                false
-            }
-        }
-    }
-
     #[quickcheck]
     fn oneof_same_as_with_optional_fields(args: Option<(bool, u32, u64, f32)>) {
         #[derive(Copy, Clone, PartialEq, Debug, autoproto::Message)]
@@ -280,12 +249,6 @@ mod tests {
                     a: None,
                     b: None,
                 }
-            }
-        }
-
-        impl autoproto::IsDefault for OptionalFields {
-            fn is_default(&self) -> bool {
-                self.nothing.is_some() && self.a.is_none() && self.b.is_none()
             }
         }
 
@@ -397,7 +360,7 @@ mod tests {
             u64s: Vec<u64>,
         }
 
-        #[derive(autoproto::IsDefault, PartialEq, Default, Debug, autoproto::Message)]
+        #[derive(PartialEq, Default, Debug, autoproto::Message)]
         struct AutoprotoMsg {
             #[autoproto(tag = 1)]
             u32s: Vec<u32>,
@@ -424,7 +387,7 @@ mod tests {
             b: Vec<Foo<u64, u32>>,
         }
 
-        #[derive(autoproto::IsDefault, PartialEq, Default, Debug, autoproto::Message)]
+        #[derive(PartialEq, Default, Debug, autoproto::Message)]
         struct AutoprotoMsg {
             #[autoproto(tag = 1)]
             a: Vec<SomeStruct<u32, u64>>,
@@ -458,7 +421,7 @@ mod tests {
         let btreeset_vec = btreeset.iter().cloned().collect::<Vec<_>>();
         let hashset_vec = hashset.iter().cloned().collect::<Vec<_>>();
 
-        #[derive(PartialEq, Eq, autoproto::IsDefault, Debug, Default, autoproto::Message)]
+        #[derive(PartialEq, Eq, Debug, Default, autoproto::Message)]
         struct WithInner<A> {
             inner: A,
         }
