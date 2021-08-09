@@ -4,7 +4,19 @@
 #[derive(Copy, Clone, PartialEq, autoproto::IsDefault, Default, Debug, autoproto::Message)]
 struct Unit;
 
-#[derive(Copy, Clone, PartialEq, autoproto::IsDefault, Default, Debug, autoproto::Message)]
+#[derive(
+    Hash,
+    Copy,
+    Clone,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    autoproto::IsDefault,
+    Default,
+    Debug,
+    autoproto::Message,
+)]
 struct Foo<A, B>(#[autoproto(tag = 4)] A, #[autoproto(tag = 5)] B);
 
 #[derive(Copy, Clone, PartialEq, autoproto::IsDefault, Default, Debug, autoproto::Message)]
@@ -53,6 +65,7 @@ impl<A: DummyOne, B: DummyTwo, C: DummyThree> autoproto::IsDefault for Oneof<A, 
 mod tests {
     use super::{DummyOne, DummyThree, DummyTwo, Foo, SomeStruct, Unit, Wrapper};
     use autoproto::prost::Message;
+    use std::collections::{BTreeSet, HashSet};
 
     use quickcheck::TestResult;
     use quickcheck_macros::quickcheck;
@@ -431,5 +444,34 @@ mod tests {
         let autoproto_msg = AutoprotoMsg { a, b };
 
         assert_eq!(round_trip(&prost_msg), round_trip(&autoproto_msg));
+    }
+
+    #[quickcheck]
+    fn other_repeated_types(a: HashSet<(u32, u64)>) {
+        let foos = a
+            .iter()
+            .cloned()
+            .map(|(a, b)| Foo(a, b))
+            .collect::<Vec<_>>();
+        let btreeset = foos.iter().cloned().collect::<BTreeSet<_>>();
+        let hashset = foos.into_iter().collect::<HashSet<_>>();
+        let btreeset_vec = btreeset.iter().cloned().collect::<Vec<_>>();
+        let hashset_vec = hashset.iter().cloned().collect::<Vec<_>>();
+
+        #[derive(PartialEq, Eq, autoproto::IsDefault, Debug, Default, autoproto::Message)]
+        struct WithInner<A> {
+            inner: A,
+        }
+
+        assert_eq!(
+            round_trip(&WithInner { inner: btreeset }),
+            round_trip(&WithInner {
+                inner: btreeset_vec
+            })
+        );
+        assert_eq!(
+            round_trip(&WithInner { inner: hashset }),
+            round_trip(&WithInner { inner: hashset_vec })
+        );
     }
 }
