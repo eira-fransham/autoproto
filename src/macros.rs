@@ -325,33 +325,20 @@ macro_rules! impl_proto_for_protomap {
                 use ::core::num::NonZeroU32;
 
                 for (key, val) in <Self as $crate::ProtoMap>::iter(self) {
-                    let skip_key = $crate::IsDefault::is_default(key);
-                    let skip_val = $crate::IsDefault::is_default(val);
-
                     let len = {
-                        let key_len = if skip_key {
-                            0
-                        } else {
-                            $crate::ProtoEncode::encoded_len_as_field(key, NonZeroU32::new(1).unwrap())
-                        };
+                        let key_len =
+                            $crate::ProtoEncode::encoded_len_as_field(key, NonZeroU32::new(1).unwrap());
 
-                        let val_len = if skip_val {
-                            0
-                        } else {
-                            $crate::ProtoEncode::encoded_len_as_field(val, NonZeroU32::new(2).unwrap())
-                        };
+                        let val_len =
+                            $crate::ProtoEncode::encoded_len_as_field(val, NonZeroU32::new(2).unwrap());
 
                         key_len + val_len
                     };
 
                     $crate::prost::encoding::encode_key(tag.get(), WireType::LengthDelimited, &mut buf);
                     $crate::prost::encoding::encode_varint(len as u64, &mut buf);
-                    if !skip_key {
-                        $crate::ProtoEncode::encode_as_field(key, NonZeroU32::new(1).unwrap(), buf);
-                    }
-                    if !skip_val {
-                        $crate::ProtoEncode::encode_as_field(val, NonZeroU32::new(2).unwrap(), buf);
-                    }
+                    $crate::ProtoEncode::encode_as_field(key, NonZeroU32::new(1).unwrap(), buf);
+                    $crate::ProtoEncode::encode_as_field(val, NonZeroU32::new(2).unwrap(), buf);
                 }
             }
 
@@ -360,15 +347,10 @@ macro_rules! impl_proto_for_protomap {
 
                 <Self as $crate::ProtoMap>::iter(self)
                     .map(|(key, val)| {
-                        let len = (if $crate::IsDefault::is_default(key) {
-                            0
-                        } else {
+                        let len = (
                             $crate::ProtoEncode::encoded_len_as_field(key, NonZeroU32::new(1).unwrap())
-                        }) + (if $crate::IsDefault::is_default(val) {
-                            0
-                        } else {
-                            $crate::ProtoEncode::encoded_len_as_field(val, NonZeroU32::new(2).unwrap())
-                        });
+                                + $crate::ProtoEncode::encoded_len_as_field(val, NonZeroU32::new(2).unwrap())
+                        );
                         $crate::prost::encoding::key_len(tag.get()) + $crate::prost::encoding::encoded_len_varint(len as u64) + len
                     })
                     .sum::<usize>()

@@ -339,27 +339,10 @@ fn try_derive_oneof(
         let struct_body = brackets(quote!(#dummy_fields));
         let variant_bindings = brackets(quote!(#names));
 
-        let (dummy_impl_generics, dummy_ty_generics, _) = dummy_generics.split_for_impl();
-
-        let where_clause_builder;
-        let dummy_where_clause = {
-            where_clause_builder = WhereClauseBuilder::new(&dummy_generics);
-
-            where_clause_builder.with_bound(quote!(::autoproto::ProtoEncode))
-        };
-
         syn::parse_quote!(
             Self::#ident #variant_bindings => {
                 #[derive(::autoproto::ProtoEncode)]
                 struct #ident #dummy_generics #struct_body #semicolon
-
-                impl #dummy_impl_generics ::autoproto::IsDefault for #ident #dummy_ty_generics
-                #dummy_where_clause
-                {
-                    fn is_default(&self) -> bool {
-                        ::autoproto::generic::protostruct::is_default(self)
-                    }
-                }
 
                 __proto_arg_func(
                     &#ident #variant_bindings,
@@ -518,8 +501,6 @@ fn try_derive_oneof(
         let (dummy_impl_generics, dummy_ty_generics, _) = dummy_generics.split_for_impl();
 
         let where_clause_builder = WhereClauseBuilder::new(&dummy_generics);
-        let is_default_where_clause =
-            where_clause_builder.with_bound(quote!(::autoproto::ProtoEncode));
         let clear_where_clause = where_clause_builder.with_bound(quote!(::autoproto::Clear));
 
         let deconstruct_dummy = brackets(quote!(#names));
@@ -534,23 +515,10 @@ fn try_derive_oneof(
                 .collect(),
         };
 
-        let (dummy_struct_def, dummy_is_default_impl, dummy_clear_impl): (
-            ItemStruct,
-            ItemImpl,
-            ItemImpl,
-        ) = (
+        let (dummy_struct_def, dummy_clear_impl): (ItemStruct, ItemImpl) = (
             syn::parse_quote!(
                 #[derive(::autoproto::Proto)]
                 struct #ident #dummy_generics #struct_body #semicolon
-            ),
-            syn::parse_quote!(
-                impl #dummy_impl_generics ::autoproto::IsDefault for #ident #dummy_ty_generics
-                #is_default_where_clause
-                {
-                    fn is_default(&self) -> bool {
-                        ::autoproto::generic::protostruct::is_default(self)
-                    }
-                }
             ),
             syn::parse_quote!(
                 impl #dummy_impl_generics ::autoproto::Clear for #ident #dummy_ty_generics
@@ -568,8 +536,6 @@ fn try_derive_oneof(
         syn::parse_quote!(
             #tag => {
                 #dummy_struct_def
-
-                #dummy_is_default_impl
 
                 #dummy_clear_impl
 
@@ -840,9 +806,8 @@ fn try_derive_protostruct<'a>(
 
     let where_clause_builder = WhereClauseBuilder::new(generics);
 
-    let protostruct_where_clause = where_clause_builder
-        .with_bound(quote!(::autoproto::ProtoEncode))
-        .with_self_bound(quote!(::autoproto::IsDefault));
+    let protostruct_where_clause =
+        where_clause_builder.with_bound(quote!(::autoproto::ProtoEncode));
     let protostructmut_where_clause = where_clause_builder
         .with_bound(quote!(::autoproto::Proto))
         .with_self_bound(quote!(::autoproto::ProtoStruct));
@@ -1165,7 +1130,7 @@ fn impl_proto_for_message(
 ) -> TokenStream2 {
     let protoencode_where_clause = where_clause_builder
         .build()
-        .with_self_bound(quote!(::autoproto::prost::Message + ::autoproto::IsDefault));
+        .with_self_bound(quote!(::autoproto::prost::Message));
     let proto_where_clause = where_clause_builder.build().with_self_bound(quote!(
         ::autoproto::prost::Message + ::autoproto::ProtoEncode + ::autoproto::Clear
     ));

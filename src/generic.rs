@@ -109,12 +109,6 @@ pub mod protostruct {
             .sum()
     }
 
-    pub fn is_default<T: ProtoStruct>(this: &T) -> bool {
-        this.fields()
-            .into_iter()
-            .all(|(_, field)| field.is_default())
-    }
-
     pub fn protoencode_encode_as_field<T: ProtoStruct>(
         this: &T,
         tag: NonZeroU32,

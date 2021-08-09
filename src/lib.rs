@@ -79,7 +79,7 @@ impl<T> Proto for PhantomData<T> {
     }
 }
 
-pub trait ProtoEncode: IsDefault {
+pub trait ProtoEncode {
     /// Encode this type _as a field_. This is different to encoding it as a message (which is
     /// what `prost::Message:encode_raw` does), as base types such as integers are encoded
     /// differently as fields vs as messages.
@@ -229,7 +229,7 @@ pub trait IsDefault {
     }
 }
 
-pub trait ProtoOneof: IsDefault {
+pub trait ProtoOneof {
     fn variant<F, T>(&self, func: F) -> T
     where
         F: FnOnce(&(dyn ProtoEncode + '_), NonZeroU32) -> T;
@@ -363,7 +363,7 @@ where
 }
 
 /// Minimal set of methods needed to derive a `prost::Message` implementation for `T: ProtoStruct`.
-pub trait ProtoStruct: IsDefault {
+pub trait ProtoStruct {
     type Fields<'a>: IntoIterator<Item = (NonZeroU32, &'a (dyn ProtoEncode + 'a))> + 'a
     where
         Self: 'a;
@@ -375,7 +375,7 @@ pub trait ProtoStructMut: ProtoStruct {
     fn field_mut(&mut self, tag: NonZeroU32) -> Option<&mut (dyn Proto + '_)>;
 }
 
-pub trait ProtoScalar: Clone + Default + Proto + Sized {
+pub trait ProtoScalar: IsDefault + Proto + Clone + Default + Sized {
     const DEFAULT_FIXED: Fixed;
     const DEFAULT_VARINT: Varint;
     const DEFAULT_ENCODING: ScalarEncoding =
@@ -641,7 +641,7 @@ where
 
 impl<const ENCODING: ScalarEncoding, T> ProtoEncodeRepeated for MappedInt<ENCODING, T>
 where
-    T: IsDefault + ProtoScalar,
+    T: ProtoScalar,
 {
     fn encode_as_field_repeated<'a, I>(iter: I, tag: NonZeroU32, mut buf: &mut dyn bytes::BufMut)
     where
@@ -754,7 +754,7 @@ where
 }
 impl<const ENCODING: ScalarEncoding, T> IsDefault for MappedInt<ENCODING, T>
 where
-    T: IsDefault + ProtoScalar,
+    T: ProtoScalar,
 {
     fn is_default(&self) -> bool {
         match (ENCODING.default, self.0.to_value()) {
