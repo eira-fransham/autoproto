@@ -120,6 +120,26 @@ macro_rules! impl_protoscalar {
                 Ok(())
             }
         }
+
+        #[allow(clippy::all)]
+        impl $crate::ProtoMergeRepeated for $t {
+            fn merge_repeated<T>(
+                values: &mut T,
+                wire_type: WireType,
+                buf: &mut dyn bytes::Buf,
+                ctx: DecodeContext,
+            ) -> Result<(), prost::DecodeError>
+            where
+                T: std::iter::Extend<Self>,
+            {
+                <MappedInt::<{ <$t>::DEFAULT_ENCODING }, Self> as $crate::ProtoMergeRepeated>::merge_repeated(
+                    &mut $crate::MapExtend::new(values, |MappedInt(i)| i),
+                    wire_type,
+                    buf,
+                    ctx,
+                )
+            }
+        }
     };
 }
 
@@ -269,13 +289,12 @@ macro_rules! impl_proto_for_protorepeated {
                 buf: &mut dyn $crate::prost::bytes::Buf,
                 ctx: DecodeContext,
             ) -> Result<(), $crate::prost::DecodeError> {
-                let mut inner =
-                    <<Self as $crate::ProtoRepeated>::Item as ::core::default::Default>::default();
-                inner.merge_self(wire_type, buf, ctx)?;
-
-                self.extend(::core::iter::once(inner));
-
-                Ok(())
+                <<Self as $crate::ProtoRepeated>::Item as $crate::ProtoMergeRepeated>::merge_repeated(
+                    self,
+                    wire_type,
+                    buf,
+                    ctx,
+                )
             }
         }
     };

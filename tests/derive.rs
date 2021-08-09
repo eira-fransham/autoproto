@@ -376,7 +376,7 @@ mod tests {
 
     #[quickcheck]
     fn repeated_ints_same_as_prost(u32s: Vec<u32>, u64s: Vec<u64>) {
-        #[derive(::prost::Message)]
+        #[derive(PartialEq, ::prost::Message)]
         struct ProstMsg {
             #[prost(repeated, uint32, tag = 1)]
             u32s: Vec<u32>,
@@ -398,17 +398,17 @@ mod tests {
         };
         let autoproto_msg = AutoprotoMsg { u32s, u64s };
 
-        assert_eq!(prost_msg.encode_to_vec(), autoproto_msg.encode_to_vec());
+        assert_eq!(round_trip(&prost_msg), round_trip(&autoproto_msg));
     }
 
     #[quickcheck]
-    fn repeated_messages_same_as_prost(a: Vec<(u32, u64)>, b: Vec<(f32, f64)>) {
-        #[derive(::prost::Message)]
+    fn repeated_messages_same_as_prost(a: Vec<(u32, u64)>, b: Vec<(u64, u32)>) {
+        #[derive(PartialEq, ::prost::Message)]
         struct ProstMsg {
             #[prost(repeated, message, tag = 1)]
             a: Vec<SomeStruct<u32, u64>>,
             #[prost(repeated, message, tag = 2)]
-            b: Vec<Foo<f32, f64>>,
+            b: Vec<Foo<u64, u32>>,
         }
 
         #[derive(autoproto::IsDefault, PartialEq, Default, Debug, autoproto::Message)]
@@ -416,7 +416,7 @@ mod tests {
             #[autoproto(tag = 1)]
             a: Vec<SomeStruct<u32, u64>>,
             #[autoproto(tag = 2)]
-            b: Vec<Foo<f32, f64>>,
+            b: Vec<Foo<u64, u32>>,
         }
 
         let (a, b): (Vec<_>, Vec<_>) = (
@@ -430,6 +430,6 @@ mod tests {
         };
         let autoproto_msg = AutoprotoMsg { a, b };
 
-        assert_eq!(prost_msg.encode_to_vec(), autoproto_msg.encode_to_vec());
+        assert_eq!(round_trip(&prost_msg), round_trip(&autoproto_msg));
     }
 }

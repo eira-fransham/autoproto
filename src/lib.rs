@@ -167,6 +167,62 @@ pub trait Proto: ProtoEncode + Clear {
     ) -> Result<(), prost::DecodeError>;
 }
 
+pub trait ProtoMergeRepeated: Proto {
+    fn merge_repeated<T>(
+        values: &mut T,
+        wire_type: WireType,
+        buf: &mut dyn bytes::Buf,
+        ctx: DecodeContext,
+    ) -> Result<(), prost::DecodeError>
+    where
+        T: Extend<Self>,
+        Self: Sized;
+}
+
+impl<This> ProtoMergeRepeated for This
+where
+    This: Proto + Default,
+{
+    default fn merge_repeated<T>(
+        values: &mut T,
+        wire_type: WireType,
+        buf: &mut dyn bytes::Buf,
+        ctx: DecodeContext,
+    ) -> Result<(), prost::DecodeError>
+    where
+        T: Extend<Self>,
+        Self: Sized,
+    {
+        let mut inner = Self::default();
+        inner.merge_self(wire_type, buf, ctx)?;
+
+        values.extend(std::iter::once(inner));
+
+        Ok(())
+    }
+}
+
+pub struct MapExtend<T, F> {
+    inner: T,
+    func: F,
+}
+
+impl<T, F> MapExtend<T, F> {
+    pub fn new(inner: T, func: F) -> Self {
+        MapExtend { inner, func }
+    }
+}
+
+impl<T, F, I, O> Extend<I> for MapExtend<&'_ mut T, F>
+where
+    T: Extend<O>,
+    F: FnMut(I) -> O,
+{
+    fn extend<Iter: IntoIterator<Item = I>>(&mut self, iter: Iter) {
+        self.inner.extend(iter.into_iter().map(&mut self.func));
+    }
+}
+
 pub trait IsDefault {
     fn is_default(&self) -> bool {
         false
@@ -537,7 +593,7 @@ impl From<Fixed> for ScalarEncodingKind {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Default, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Copy, Clone)]
 #[repr(transparent)]
 pub struct MappedInt<const ENCODING: ScalarEncoding, T>(pub T);
 
@@ -554,6 +610,12 @@ impl<const ENCODING: ScalarEncoding, T> MappedInt<ENCODING, T> {
     pub fn from_mut(v: &mut T) -> &mut Self {
         // Safe due to `repr(transparent)`
         unsafe { std::mem::transmute(v) }
+    }
+}
+
+impl<const ENCODING: ScalarEncoding, T> From<T> for MappedInt<ENCODING, T> {
+    fn from(other: T) -> Self {
+        Self::new(other)
     }
 }
 
@@ -574,15 +636,6 @@ where
                 fixed.unwrap_or(T::DEFAULT_FIXED).width() * iter.len()
             }
         }
-    }
-}
-
-impl<const ENCODING: ScalarEncoding, T> Clear for MappedInt<ENCODING, T>
-where
-    T: Clear,
-{
-    fn clear(&mut self) {
-        self.0.clear()
     }
 }
 
@@ -644,6 +697,61 @@ where
     }
 }
 
+impl<const ENCODING: ScalarEncoding, I> ProtoMergeRepeated for MappedInt<ENCODING, I>
+where
+    I: ProtoScalar,
+{
+    fn merge_repeated<T>(
+        values: &mut T,
+        wire_type: WireType,
+        mut buf: &mut dyn bytes::Buf,
+        ctx: DecodeContext,
+    ) -> Result<(), prost::DecodeError>
+    where
+        T: Extend<Self>,
+        Self: Sized,
+    {
+        use std::iter;
+
+        let expected_wire_type = match ENCODING.kind {
+            ScalarEncodingKind::Varint(_) => WireType::Varint,
+            ScalarEncodingKind::Fixed(fixed) => fixed.unwrap_or(I::DEFAULT_FIXED).into(),
+        };
+
+        match wire_type {
+            WireType::LengthDelimited => {
+                let len = prost::encoding::decode_varint(&mut buf)?;
+                let remaining = buf.remaining();
+
+                if len > remaining as u64 {
+                    return Err(prost::DecodeError::new("buffer underflow"));
+                }
+
+                let limit = remaining - len as usize;
+
+                while buf.remaining() > limit {
+                    let mut value = Self::default();
+                    value.merge_self(expected_wire_type, buf, ctx.clone())?;
+                    values.extend(iter::once(value));
+                }
+
+                if buf.remaining() != limit {
+                    return Err(prost::DecodeError::new("delimited length exceeded"));
+                }
+
+                Ok(())
+            }
+            _ => {
+                let mut inner = Self::default();
+                inner.merge_self(expected_wire_type, buf, ctx)?;
+
+                values.extend(iter::once(inner));
+
+                Ok(())
+            }
+        }
+    }
+}
 impl<const ENCODING: ScalarEncoding, T> IsDefault for MappedInt<ENCODING, T>
 where
     T: IsDefault + ProtoScalar,
