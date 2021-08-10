@@ -1,7 +1,60 @@
-#![allow(incomplete_features)]
-#![feature(specialization, const_generics, generic_associated_types)]
+#![feature(generic_associated_types)]
 
-pub use autoproto_derive::{IsDefault, Message, Proto, ProtoEncode};
+//! This crate implements a custom derive macro for the `prost::Message` trait,
+//! along with including some helper traits to make automatic derivation as
+//! simple as possible - basically putting more information in the type system
+//! instead of in the macro implementation. If the macro doesn't do something
+//! that you need it to do, you can implement one of the "base traits" like
+//! `ProtoStruct` and `ProtoOneof` and use the functions in the `generic` module
+//! to implement the rest of the traits.
+//!
+//! One change from the `prost` macro is that either all fields must be tagged or
+//! no fields can be tagged. For example, these two are ok:
+//!
+//! ```rust
+//! # #![feature(generic_associated_types)]
+//!
+//! #[derive(Copy, Clone, PartialEq, Default, Debug, autoproto::Message)]
+//! struct SomeStructTagged<A, B, C, D, E> {
+//!     #[autoproto(tag = 1)]
+//!     a: A,
+//!     #[autoproto(tag = 2)]
+//!     b: B,
+//!     #[autoproto(tag = 3)]
+//!     c: C,
+//!     #[autoproto(tag = 4)]
+//!     d: D,
+//!     #[autoproto(tag = 5)]
+//!     e: E,
+//! }
+//!
+//! #[derive(Copy, Clone, PartialEq, Default, Debug, autoproto::Message)]
+//! struct SomeStruct<A, B, C, D, E> {
+//!     a: A,
+//!     b: B,
+//!     c: C,
+//!     d: D,
+//!     e: E,
+//! }
+//! ```
+//!
+//! But the following is not:
+//!
+//! ```rust,compile_fail
+//! # #![feature(generic_associated_types)]
+//!
+//! #[derive(Copy, Clone, PartialEq, Default, Debug, autoproto::Message)]
+//! struct SomeStruct<A, B, C, D, E> {
+//!     a: A,
+//!     b: B,
+//!     #[autoproto(tag = 1)]
+//!     c: C,
+//!     d: D,
+//!     e: E,
+//! }
+//! ```
+
+pub use autoproto_derive::{IsDefault, Message, Proto, ProtoEncode, ProtoScalar};
 
 pub use prost;
 pub use prost::bytes;
@@ -11,6 +64,7 @@ pub mod macros;
 
 use prost::encoding::{DecodeContext, WireType};
 use std::{
+    borrow::Borrow,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     convert::{TryFrom, TryInto},
     fmt::{self, Debug},
@@ -103,13 +157,10 @@ pub trait ProtoEncodeRepeated: ProtoEncode {
 
 impl<T> ProtoEncodeRepeated for T
 where
-    T: ProtoEncode,
+    T: ProtoEncode + IsMessage,
 {
-    default fn encode_as_field_repeated<'a, I>(
-        iter: I,
-        tag: NonZeroU32,
-        buf: &mut dyn bytes::BufMut,
-    ) where
+    fn encode_as_field_repeated<'a, I>(iter: I, tag: NonZeroU32, buf: &mut dyn bytes::BufMut)
+    where
         I: Iterator<Item = &'a Self> + Clone,
         Self: 'a,
     {
@@ -118,7 +169,7 @@ where
         }
     }
 
-    default fn encoded_len_as_field_repeated<'a, I>(iter: I, tag: NonZeroU32) -> usize
+    fn encoded_len_as_field_repeated<'a, I>(iter: I, tag: NonZeroU32) -> usize
     where
         I: Iterator<Item = &'a Self>,
         Self: 'a,
@@ -155,7 +206,7 @@ where
 
 /// Extension trait to make generic code using protobuf messages easier to write,
 /// by avoiding the need to explicitly spell out the wire type in the macro.
-pub trait Proto: ProtoEncode + Clear {
+pub trait Proto: ProtoEncode {
     /// Merge this type. For messages this will consume the buffer, setting each tag respectively.
     /// For scalar values this will decode the next value and set `self` to it. This is different
     /// to `Message::merge` in `prost`, which does not understand scalar types at all.
@@ -167,7 +218,7 @@ pub trait Proto: ProtoEncode + Clear {
     ) -> Result<(), prost::DecodeError>;
 }
 
-pub trait ProtoMergeRepeated: Proto {
+pub trait ProtoMergeRepeated: Proto + ProtoEncodeRepeated {
     fn merge_repeated<T>(
         values: &mut T,
         wire_type: WireType,
@@ -181,9 +232,9 @@ pub trait ProtoMergeRepeated: Proto {
 
 impl<This> ProtoMergeRepeated for This
 where
-    This: Proto + Default,
+    This: IsMessage + Proto + Default,
 {
-    default fn merge_repeated<T>(
+    fn merge_repeated<T>(
         values: &mut T,
         wire_type: WireType,
         buf: &mut dyn bytes::Buf,
@@ -229,7 +280,9 @@ pub trait IsDefault {
     }
 }
 
-pub trait ProtoOneof {
+pub trait IsMessage {}
+
+pub trait ProtoOneof: IsMessage {
     fn variant<F, T>(&self, func: F) -> T
     where
         F: FnOnce(&(dyn ProtoEncode + '_), NonZeroU32) -> T;
@@ -363,7 +416,7 @@ where
 }
 
 /// Minimal set of methods needed to derive a `prost::Message` implementation for `T: ProtoStruct`.
-pub trait ProtoStruct {
+pub trait ProtoStruct: IsMessage {
     type Fields<'a>: IntoIterator<Item = (NonZeroU32, &'a (dyn ProtoEncode + 'a))> + 'a
     where
         Self: 'a;
@@ -595,11 +648,23 @@ impl From<Fixed> for ScalarEncodingKind {
 
 #[derive(Default, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Copy, Clone)]
 #[repr(transparent)]
-pub struct MappedInt<const ENCODING: ScalarEncoding, T>(pub T);
+pub struct MappedInt<T, E = DefaultEncoding<T>>(pub T, pub PhantomData<E>);
 
-impl<const ENCODING: ScalarEncoding, T> MappedInt<ENCODING, T> {
+impl<T, E> Borrow<T> for MappedInt<T, E> {
+    fn borrow(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T, E> Borrow<T> for &'_ MappedInt<T, E> {
+    fn borrow(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T, E> MappedInt<T, E> {
     pub fn new(inner: T) -> Self {
-        Self(inner)
+        Self(inner, Default::default())
     }
 
     pub fn from_ref(v: &T) -> &Self {
@@ -613,54 +678,54 @@ impl<const ENCODING: ScalarEncoding, T> MappedInt<ENCODING, T> {
     }
 }
 
-impl<const ENCODING: ScalarEncoding, T> From<T> for MappedInt<ENCODING, T> {
+impl<T, E> From<T> for MappedInt<T, E> {
     fn from(other: T) -> Self {
         Self::new(other)
     }
 }
 
-impl<const ENCODING: ScalarEncoding, T> MappedInt<ENCODING, T>
+impl<T, E> MappedInt<T, E>
 where
     T: ProtoScalar,
+    E: Encoding,
 {
-    fn packed_len<'a, I>(iter: I) -> usize
+    fn packed_len<I, B>(iter: I) -> usize
     where
-        I: ExactSizeIterator<Item = &'a Self>,
-        Self: 'a,
+        I: ExactSizeIterator<Item = B>,
+        B: Borrow<T>,
     {
-        match ENCODING.kind {
+        match E::ENCODING.kind {
             ScalarEncodingKind::Varint(varint) => iter
-                .map(|i| varint.unwrap_or(T::DEFAULT_VARINT).width(i.0.to_value()))
+                .map(|i| {
+                    varint
+                        .unwrap_or(T::DEFAULT_VARINT)
+                        .width(i.borrow().to_value())
+                })
                 .sum(),
             ScalarEncodingKind::Fixed(fixed) => {
                 fixed.unwrap_or(T::DEFAULT_FIXED).width() * iter.len()
             }
         }
     }
-}
 
-impl<const ENCODING: ScalarEncoding, T> ProtoEncodeRepeated for MappedInt<ENCODING, T>
-where
-    T: ProtoScalar,
-{
-    fn encode_as_field_repeated<'a, I>(iter: I, tag: NonZeroU32, mut buf: &mut dyn bytes::BufMut)
+    pub fn encode_as_field_repeated<I, B>(iter: I, tag: NonZeroU32, mut buf: &mut dyn bytes::BufMut)
     where
-        I: ExactSizeIterator<Item = &'a Self> + Clone,
-        Self: 'a,
+        I: ExactSizeIterator<Item = B> + Clone,
+        B: Borrow<T>,
     {
-        if ENCODING.packed {
+        if E::ENCODING.packed {
             let len = Self::packed_len(iter.clone());
 
             prost::encoding::encode_key(tag.get(), WireType::LengthDelimited, &mut buf);
             prost::encoding::encode_varint(len as u64, &mut buf);
 
-            match ENCODING.kind {
+            match E::ENCODING.kind {
                 ScalarEncodingKind::Varint(varint) => {
                     let varint = varint.unwrap_or(T::DEFAULT_VARINT);
 
                     for value in iter {
                         prost::encoding::encode_varint(
-                            varint.make_u64_varint(value.0.to_value()),
+                            varint.make_u64_varint(value.borrow().to_value()),
                             &mut buf,
                         );
                     }
@@ -669,15 +734,64 @@ where
                     let fixed = fixed.unwrap_or(T::DEFAULT_FIXED);
 
                     for value in iter {
-                        fixed.write(value.0.to_value(), buf)
+                        fixed.write(value.borrow().to_value(), buf)
                     }
                 }
             }
         } else {
             for i in iter {
-                i.encode_as_field(tag, buf);
+                i.borrow().encode_as_field(tag, buf);
             }
         }
+    }
+
+    pub fn encoded_len_as_field_repeated<I, B>(iter: I, tag: NonZeroU32) -> usize
+    where
+        I: ExactSizeIterator<Item = B>,
+        B: Borrow<T>,
+    {
+        if E::ENCODING.packed {
+            let len = Self::packed_len(iter);
+
+            prost::encoding::key_len(tag.get())
+                + prost::encoding::encoded_len_varint(len as u64)
+                + len
+        } else {
+            iter.map(|i| i.borrow().encoded_len_as_field(tag)).sum()
+        }
+    }
+}
+
+pub trait Encoding: Default {
+    const ENCODING: ScalarEncoding;
+}
+
+pub struct DefaultEncoding<T>(pub PhantomData<T>);
+
+impl<T> Default for DefaultEncoding<T> {
+    fn default() -> Self {
+        Self(Default::default())
+    }
+}
+
+impl<T> Encoding for DefaultEncoding<T>
+where
+    T: ProtoScalar,
+{
+    const ENCODING: ScalarEncoding = T::DEFAULT_ENCODING;
+}
+
+impl<T, E> ProtoEncodeRepeated for MappedInt<T, E>
+where
+    T: ProtoScalar,
+    E: Encoding,
+{
+    fn encode_as_field_repeated<'a, I>(iter: I, tag: NonZeroU32, buf: &mut dyn bytes::BufMut)
+    where
+        I: ExactSizeIterator<Item = &'a Self> + Clone,
+        Self: 'a,
+    {
+        Self::encode_as_field_repeated(iter, tag, buf)
     }
 
     fn encoded_len_as_field_repeated<'a, I>(iter: I, tag: NonZeroU32) -> usize
@@ -685,21 +799,14 @@ where
         I: ExactSizeIterator<Item = &'a Self>,
         Self: 'a,
     {
-        if ENCODING.packed {
-            let len = Self::packed_len(iter);
-
-            prost::encoding::key_len(tag.get())
-                + prost::encoding::encoded_len_varint(len as u64)
-                + len
-        } else {
-            iter.map(|i| i.encoded_len_as_field(tag)).sum()
-        }
+        Self::encoded_len_as_field_repeated(iter, tag)
     }
 }
 
-impl<const ENCODING: ScalarEncoding, I> ProtoMergeRepeated for MappedInt<ENCODING, I>
+impl<I, E> ProtoMergeRepeated for MappedInt<I, E>
 where
     I: ProtoScalar,
+    E: Encoding,
 {
     fn merge_repeated<T>(
         values: &mut T,
@@ -713,7 +820,7 @@ where
     {
         use std::iter;
 
-        let expected_wire_type = match ENCODING.kind {
+        let expected_wire_type = match E::ENCODING.kind {
             ScalarEncodingKind::Varint(_) => WireType::Varint,
             ScalarEncodingKind::Fixed(fixed) => fixed.unwrap_or(I::DEFAULT_FIXED).into(),
         };
@@ -752,25 +859,28 @@ where
         }
     }
 }
-impl<const ENCODING: ScalarEncoding, T> IsDefault for MappedInt<ENCODING, T>
+
+impl<T, E> IsDefault for MappedInt<T, E>
 where
     T: ProtoScalar,
+    E: Encoding,
 {
     fn is_default(&self) -> bool {
-        match (ENCODING.default, self.0.to_value()) {
+        match (E::ENCODING.default, self.0.to_value()) {
             (Some(default), Value::Int(inner)) => default == inner,
             _ => self.0.is_default(),
         }
     }
 }
 
-impl<const ENCODING: ScalarEncoding, T> ProtoEncode for MappedInt<ENCODING, T>
+impl<T, E> ProtoEncode for MappedInt<T, E>
 where
     T: ProtoScalar,
+    E: Encoding,
 {
     fn encode_as_field(&self, tag: NonZeroU32, mut buf: &mut dyn bytes::BufMut) {
         if !self.0.is_default() {
-            match ENCODING.kind {
+            match E::ENCODING.kind {
                 ScalarEncodingKind::Varint(varint) => {
                     prost::encoding::encode_key(tag.get(), WireType::Varint, &mut buf);
                     prost::encoding::encode_varint(
@@ -795,7 +905,7 @@ where
         if self.0.is_default() {
             0
         } else {
-            match ENCODING.kind {
+            match E::ENCODING.kind {
                 ScalarEncodingKind::Varint(varint) => varint
                     .unwrap_or(T::DEFAULT_VARINT)
                     .encoded_len(tag, self.0.to_value()),
@@ -807,9 +917,10 @@ where
     }
 }
 
-impl<const ENCODING: ScalarEncoding, T> Proto for MappedInt<ENCODING, T>
+impl<T, E> Proto for MappedInt<T, E>
 where
     T: ProtoScalar,
+    E: Encoding,
 {
     fn merge_self(
         &mut self,
@@ -817,7 +928,7 @@ where
         mut buf: &mut dyn bytes::Buf,
         _ctx: DecodeContext,
     ) -> Result<(), prost::DecodeError> {
-        self.0 = match ENCODING.kind {
+        self.0 = match E::ENCODING.kind {
             ScalarEncodingKind::Varint(varint) => {
                 prost::encoding::check_wire_type(WireType::Varint, wire_type)?;
 
@@ -928,14 +1039,13 @@ impl_proto_for_protomap!(
         V: 'static
 );
 
-impl_proto_for_protorepeated!(impl<T> Proto for Vec<T> where T: Proto, T: Default, where T: 'static);
+impl_proto_for_protorepeated!(impl<T> Proto for Vec<T> where T: ProtoMergeRepeated, where T: 'static);
 impl_proto_for_protorepeated!(
     impl<T> Proto for HashSet<T>
     where
         T: Eq,
         T: Hash,
-        T: Proto,
-        T: Default,
+        T: ProtoMergeRepeated,
     where
         T: 'static
 );
@@ -943,7 +1053,7 @@ impl_proto_for_protorepeated!(
     impl<T> Proto for BTreeSet<T>
     where
         T: Ord,
-        T: Proto,
+        T: ProtoMergeRepeated,
         T: Default,
     where
         T: 'static
@@ -954,17 +1064,16 @@ impl_proto_for_protorepeated!(
     impl<T> Proto for smallvec::SmallVec<T>
     where
         T: smallvec::Array,
-        <T as smallvec::Array>::Item: Proto,
-        <T as smallvec::Array>::Item: Default,
+        <T as smallvec::Array>::Item: ProtoMergeRepeated,
     where
         T: 'static
 );
+
 #[cfg(feature = "arrayvec")]
 impl_proto_for_protorepeated!(
     impl<T; const SIZE: usize> Proto for arrayvec::ArrayVec<T, SIZE>
     where
-        T: Proto,
-        T: Default,
+        T: ProtoMergeRepeated,
     where
         T: 'static
 );

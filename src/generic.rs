@@ -159,6 +159,33 @@ pub mod default {
     }
 }
 
+pub mod proto {
+    use crate::Proto;
+    use prost::{
+        bytes::Buf,
+        encoding::{DecodeContext, WireType},
+        DecodeError,
+    };
+
+    pub fn protomergerepeated_merge_repeated<This, T>(
+        values: &mut T,
+        wire_type: WireType,
+        buf: &mut dyn Buf,
+        ctx: DecodeContext,
+    ) -> Result<(), DecodeError>
+    where
+        T: Extend<This>,
+        This: Proto + Default,
+    {
+        let mut inner = This::default();
+        inner.merge_self(wire_type, buf, ctx)?;
+
+        values.extend(std::iter::once(inner));
+
+        Ok(())
+    }
+}
+
 pub mod protooneof {
     use crate::ProtoOneof;
     use prost::{
@@ -193,7 +220,7 @@ pub mod protooneof {
 }
 
 pub mod protoscalar {
-    use crate::{MappedInt, Proto as _, ProtoEncode as _, ProtoScalar, ScalarEncoding};
+    use crate::{Encoding, MappedInt, Proto as _, ProtoEncode as _, ProtoScalar};
     use prost::{
         bytes::{Buf, BufMut},
         encoding::{DecodeContext, WireType},
@@ -201,31 +228,28 @@ pub mod protoscalar {
     };
     use std::num::NonZeroU32;
 
-    pub fn protoencode_encode_as_field<const DEFAULT_ENCODING: ScalarEncoding, T: ProtoScalar>(
+    pub fn protoencode_encode_as_field<T: ProtoScalar, E: Encoding>(
         this: &T,
         tag: NonZeroU32,
         buf: &mut dyn BufMut,
     ) {
-        MappedInt::<DEFAULT_ENCODING, _>(this.clone()).encode_as_field(tag, buf)
+        MappedInt::<_, E>(this.clone(), Default::default()).encode_as_field(tag, buf)
     }
 
-    pub fn protoencode_encoded_len_as_field<
-        const DEFAULT_ENCODING: ScalarEncoding,
-        T: ProtoScalar,
-    >(
+    pub fn protoencode_encoded_len_as_field<T: ProtoScalar, E: Encoding>(
         this: &T,
         tag: NonZeroU32,
     ) -> usize {
-        MappedInt::<DEFAULT_ENCODING, _>(this.clone()).encoded_len_as_field(tag)
+        MappedInt::<_, E>(this.clone(), Default::default()).encoded_len_as_field(tag)
     }
 
-    pub fn proto_merge_self<const DEFAULT_ENCODING: ScalarEncoding, T: ProtoScalar>(
+    pub fn proto_merge_self<T: ProtoScalar, E: Encoding>(
         this: &mut T,
         wire_type: WireType,
         buf: &mut dyn Buf,
         ctx: DecodeContext,
     ) -> Result<(), DecodeError> {
-        let mut mapped = MappedInt::<DEFAULT_ENCODING, _>(this.clone());
+        let mut mapped = MappedInt::<_, E>(this.clone(), Default::default());
         mapped.merge_self(wire_type, buf, ctx)?;
 
         *this = mapped.0;

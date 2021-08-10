@@ -3,7 +3,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::ToTokens;
 use std::{borrow::Cow, num::NonZeroU32};
 use syn::{
-    punctuated::Punctuated, Attribute, GenericParam, Generics, Ident, Lit, Meta, MetaList,
+    punctuated::Punctuated, Attribute, GenericParam, Generics, Ident, Lit, LitBool, Meta, MetaList,
     NestedMeta, WhereClause, WherePredicate,
 };
 
@@ -172,15 +172,29 @@ impl MessageAttributes {
             })
             .flatten()
         {
-            if let NestedMeta::Meta(Meta::Path(inner)) = meta {
-                let ident = if let Some(ident) = inner.get_ident() {
-                    ident
-                } else {
-                    continue;
+            if let NestedMeta::Meta(meta) = meta {
+                let (ident, value) = match &meta {
+                    Meta::Path(inner) => {
+                        if let Some(ident) = inner.get_ident() {
+                            (ident, true)
+                        } else {
+                            continue;
+                        }
+                    }
+                    Meta::NameValue(inner) => {
+                        if let (Some(ident), Lit::Bool(LitBool { value, .. })) =
+                            (inner.path.get_ident(), &inner.lit)
+                        {
+                            (ident, *value)
+                        } else {
+                            continue;
+                        }
+                    }
+                    _ => continue,
                 };
 
                 if ident == "transparent" {
-                    transparent = true;
+                    transparent = value;
                 }
             }
         }

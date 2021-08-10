@@ -68,56 +68,41 @@ macro_rules! impl_protoscalar {
         #[allow(clippy::all)]
         impl $crate::ProtoEncode for $t {
             fn encode_as_field(&self, tag: ::core::num::NonZeroU32, buf: &mut dyn $crate::prost::bytes::BufMut) {
-                MappedInt::<{ <$t>::DEFAULT_ENCODING }, _>(*self).encode_as_field(tag, buf)
+                MappedInt::<Self>(*self, ::core::default::Default::default()).encode_as_field(tag, buf)
             }
 
             fn encoded_len_as_field(&self, tag: ::core::num::NonZeroU32) -> usize {
-                MappedInt::<{ <$t>::DEFAULT_ENCODING }, _>(*self).encoded_len_as_field(tag)
+                MappedInt::<Self>(*self, ::core::default::Default::default()).encoded_len_as_field(tag)
             }
         }
 
         #[allow(clippy::all)]
         impl $crate::ProtoEncodeRepeated for $t {
-            fn encode_as_field_repeated<'a, I>(iter: I, tag: NonZeroU32, buf: &mut dyn bytes::BufMut)
+            fn encode_as_field_repeated<'a, I>(
+                iter: I,
+                tag: ::core::num::NonZeroU32,
+                buf: &mut dyn $crate::bytes::BufMut,
+            )
             where
                 I: ExactSizeIterator<Item = &'a Self> + Clone,
                 Self: 'a,
             {
-                <MappedInt::<{ <$t>::DEFAULT_ENCODING }, _> as $crate::ProtoEncodeRepeated>::encode_as_field_repeated(
-                    // We need to do `&*` to make Rust correctly infer lifetimes
-                    iter.map(|i| &*MappedInt::from_ref(i)),
+                MappedInt::<Self>::encode_as_field_repeated(
+                    iter,
                     tag,
                     buf,
                 );
             }
 
-            fn encoded_len_as_field_repeated<'a, I>(iter: I, tag: NonZeroU32) -> usize
+            fn encoded_len_as_field_repeated<'a, I>(iter: I, tag: ::core::num::NonZeroU32) -> usize
             where
                 I: ExactSizeIterator<Item = &'a Self>,
                 Self: 'a,
             {
-                <MappedInt::<{ <$t>::DEFAULT_ENCODING }, _> as $crate::ProtoEncodeRepeated>::encoded_len_as_field_repeated(
-                    // We need to do `&*` to make Rust correctly infer lifetimes
-                    iter.map(|i| &*MappedInt::from_ref(i)),
+                MappedInt::<Self>::encoded_len_as_field_repeated(
+                    iter,
                     tag,
                 )
-            }
-        }
-
-        #[allow(clippy::all)]
-        impl $crate::Proto for $t {
-            fn merge_self(
-                &mut self,
-                wire_type: WireType,
-                buf: &mut dyn $crate::prost::bytes::Buf,
-                ctx: DecodeContext,
-            ) -> Result<(), $crate::prost::DecodeError> {
-                let mut mapped = MappedInt::<{ <$t>::DEFAULT_ENCODING }, _>(*self);
-                mapped.merge_self(wire_type, buf, ctx)?;
-
-                *self = mapped.0;
-
-                Ok(())
             }
         }
 
@@ -132,14 +117,32 @@ macro_rules! impl_protoscalar {
             where
                 T: std::iter::Extend<Self>,
             {
-                <MappedInt::<{ <$t>::DEFAULT_ENCODING }, Self> as $crate::ProtoMergeRepeated>::merge_repeated(
-                    &mut $crate::MapExtend::new(values, |MappedInt(i)| i),
+                <MappedInt::<Self> as $crate::ProtoMergeRepeated>::merge_repeated(
+                    &mut $crate::MapExtend::new(values, |MappedInt(i, _)| i),
                     wire_type,
                     buf,
                     ctx,
                 )
             }
         }
+
+        #[allow(clippy::all)]
+        impl $crate::Proto for $t {
+            fn merge_self(
+                &mut self,
+                wire_type: WireType,
+                buf: &mut dyn $crate::prost::bytes::Buf,
+                ctx: DecodeContext,
+            ) -> Result<(), $crate::prost::DecodeError> {
+                let mut mapped = MappedInt::<Self>(*self, ::core::default::Default::default());
+                mapped.merge_self(wire_type, buf, ctx)?;
+
+                *self = mapped.0;
+
+                Ok(())
+            }
+        }
+
     };
 }
 
@@ -250,7 +253,7 @@ macro_rules! impl_proto_for_protorepeated {
             fn is_default(&self) -> bool {
                 <
                     <Self as $crate::ProtoRepeated>::Iter<'_>
-                        as std::iter::ExactSizeIterator
+                        as ::core::iter::ExactSizeIterator
                 >::len(&$crate::ProtoRepeated::iter(self)) == 0
             }
         }

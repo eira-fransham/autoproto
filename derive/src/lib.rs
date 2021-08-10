@@ -9,8 +9,8 @@ use quote::{quote, ToTokens};
 use std::{iter, num::NonZeroU32};
 use syn::{
     punctuated::Punctuated, Arm, Attribute, Block, Data, DataEnum, DataStruct, DeriveInput, Expr,
-    ExprMatch, Field, Fields, FieldsNamed, FieldsUnnamed, GenericParam, Generics, Ident, ItemImpl,
-    ItemStruct, Lit, LitInt, Member, Stmt, Token, Type, TypePath,
+    ExprMatch, Field, Fields, FieldsNamed, FieldsUnnamed, GenericParam, Generics, Ident, ItemConst,
+    ItemImpl, ItemStruct, Lit, LitInt, Member, Stmt, Token, Type, TypePath,
 };
 
 mod newtype;
@@ -22,8 +22,7 @@ use util::{FieldAttributes, MessageAttributes, Result, WhereClauseBuilder};
 pub fn derive_message(input: TokenStream) -> TokenStream {
     if cfg!(debug_assertions) {
         std::panic::set_hook(Box::new(|_panic_info| {
-            let backtrace = std::backtrace::Backtrace::force_capture();
-            eprintln!("{}", backtrace);
+            eprintln!("{}", std::backtrace::Backtrace::capture());
         }));
     }
 
@@ -40,9 +39,337 @@ pub fn derive_protoencode(input: TokenStream) -> TokenStream {
     try_derive_protoencode(input).unwrap().into()
 }
 
+#[proc_macro_derive(ProtoScalar, attributes(autoproto))]
+pub fn derive_protoscalar(input: TokenStream) -> TokenStream {
+    try_derive_protoscalar(input).unwrap().into()
+}
+
 #[proc_macro_derive(IsDefault, attributes(autoproto))]
 pub fn derive_is_default(input: TokenStream) -> TokenStream {
     try_derive_is_default(input).unwrap().into()
+}
+
+fn derive_protoscalar_enum(
+    ident: &Ident,
+    generics: &Generics,
+    data: &DataEnum,
+) -> Result<TokenStream2> {
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+
+    let variant_constants = data
+        .variants
+        .iter()
+        .enumerate()
+        .map::<Result<_>, _>(|(i, variant)| {
+            if variant.fields.is_empty() {
+                let variant_ident = &variant.ident;
+
+                let const_name = Ident::new(&format!("__TAG_{}", i), variant_ident.span().clone());
+
+                let item: ItemConst = syn::parse_quote!(
+                    const #const_name: ::core::primitive::i32 = #ident::#variant_ident as ::core::primitive::i32;
+                );
+
+                Ok((const_name, variant_ident, item))
+            } else {
+                bail!("Cannot derive `protoscalar` for an enum with fields");
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let constant_items = variant_constants
+        .iter()
+        .map(|(_, _, item)| item)
+        .collect::<Vec<_>>();
+
+    let match_arms = variant_constants
+        .iter()
+        .map::<Arm, _>(|(const_name, variant_ident, _)| syn::parse_quote!(#const_name => #ident :: #variant_ident))
+        .collect::<Punctuated<_, Token!(,)>>();
+
+    let (
+        protoscalar_impl,
+        is_default_impl,
+        protoencode_impl,
+        protoencoderepeated_impl,
+        protomergerepeated_impl,
+        proto_impl,
+    ): (ItemImpl, ItemImpl, ItemImpl, ItemImpl, ItemImpl, ItemImpl) = (
+        syn::parse_quote!(
+            impl #impl_generics ::autoproto::ProtoScalar for #ident #ty_generics #where_clause {
+                const DEFAULT_FIXED: ::autoproto::Fixed =
+                    <::core::primitive::i32 as ::autoproto::ProtoScalar>::DEFAULT_FIXED;
+                const DEFAULT_VARINT: ::autoproto::Varint =
+                    <::core::primitive::i32 as ::autoproto::ProtoScalar>::DEFAULT_VARINT;
+                const DEFAULT_ENCODING: ::autoproto::ScalarEncoding =
+                    <::core::primitive::i32 as ::autoproto::ProtoScalar>::DEFAULT_ENCODING;
+
+                fn from_value(other: ::autoproto::Value) -> Option<Self> {
+                    ::core::debug_assert_eq!(<Self as ::core::default::Default>::default() as i32, 0);
+
+                    #(#constant_items)*
+
+                    Some(match <::core::primitive::i32 as ::autoproto::ProtoScalar>::from_value(other)? {
+                        #match_arms,
+                        _ => return None,
+                    })
+                }
+
+                fn to_value(&self) -> ::autoproto::Value {
+                    ::core::debug_assert_eq!(<Self as ::core::default::Default>::default() as i32, 0);
+
+                    <::core::primitive::i32 as ::autoproto::ProtoScalar>::to_value(
+                        &(::core::clone::Clone::clone(self) as ::core::primitive::i32)
+                    )
+                }
+            }
+        ),
+        syn::parse_quote!(
+            impl #impl_generics ::autoproto::IsDefault for #ident #ty_generics #where_clause {
+                fn is_default(&self) -> ::core::primitive::bool {
+                    (::core::clone::Clone::clone(self) as ::core::primitive::i32) == 0
+                }
+            }
+        ),
+        syn::parse_quote!(
+            impl #impl_generics ::autoproto::ProtoEncode for #ident #ty_generics #where_clause {
+                fn encode_as_field(
+                    &self,
+                    tag: ::core::num::NonZeroU32,
+                    buf: &mut dyn ::autoproto::prost::bytes::BufMut,
+                ) {
+                    <
+                        ::autoproto::MappedInt::<Self>
+                        as ::autoproto::ProtoEncode
+                    >::encode_as_field(
+                        &::autoproto::MappedInt::new(::core::clone::Clone::clone(self)),
+                        tag,
+                        buf,
+                    )
+                }
+
+                fn encoded_len_as_field(&self, tag: ::core::num::NonZeroU32) -> usize {
+                    <
+                        ::autoproto::MappedInt::<Self>
+                        as ::autoproto::ProtoEncode
+                    >::encoded_len_as_field(
+                        &::autoproto::MappedInt::new(::core::clone::Clone::clone(self)),
+                        tag,
+                    )
+                }
+            }
+        ),
+        syn::parse_quote!(
+            impl #impl_generics ::autoproto::ProtoEncodeRepeated for #ident #ty_generics #where_clause {
+                fn encode_as_field_repeated<'__lifetime, I>(
+                    iter: I,
+                    tag: ::core::num::NonZeroU32,
+                    buf: &mut dyn ::autoproto::bytes::BufMut,
+                )
+                where
+                    I: ExactSizeIterator<Item = &'__lifetime Self> + Clone,
+                    Self: '__lifetime,
+                {
+                    ::autoproto::MappedInt::<Self>::encode_as_field_repeated(
+                        iter,
+                        tag,
+                        buf,
+                    );
+                }
+
+                fn encoded_len_as_field_repeated<'__lifetime, I>(iter: I, tag: ::core::num::NonZeroU32) -> usize
+                where
+                    I: ExactSizeIterator<Item = &'__lifetime Self>,
+                    Self: '__lifetime,
+                {
+                    ::autoproto::MappedInt::<Self>::encoded_len_as_field_repeated(
+                        iter,
+                        tag,
+                    )
+                }
+        }),
+        syn::parse_quote!(
+            impl #impl_generics ::autoproto::ProtoMergeRepeated for #ident #ty_generics #where_clause {
+                fn merge_repeated<T>(
+                    values: &mut T,
+                    wire_type: ::autoproto::prost::encoding::WireType,
+                    buf: &mut dyn ::autoproto::bytes::Buf,
+                    ctx: ::autoproto::prost::encoding::DecodeContext,
+                ) -> Result<(), ::autoproto::prost::DecodeError>
+                where
+                    T: std::iter::Extend<Self>,
+                {
+                    <::autoproto::MappedInt::<Self> as ::autoproto::ProtoMergeRepeated>::merge_repeated(
+                        &mut ::autoproto::MapExtend::new(values, |::autoproto::MappedInt(i, _)| i),
+                        wire_type,
+                        buf,
+                        ctx,
+                    )
+                }
+            }
+        ),
+        syn::parse_quote!(
+            impl #impl_generics ::autoproto::Proto for #ident #ty_generics #where_clause {
+                fn merge_self(
+                    &mut self,
+                    wire_type: ::autoproto::prost::encoding::WireType,
+                    buf: &mut dyn ::autoproto::prost::bytes::Buf,
+                    ctx: ::autoproto::prost::encoding::DecodeContext,
+                ) -> Result<(), ::autoproto::prost::DecodeError> {
+                    let mut mapped = ::autoproto::MappedInt::<Self>::new(::core::clone::Clone::clone(self));
+                    ::autoproto::Proto::merge_self(&mut mapped, wire_type, buf, ctx)?;
+
+                    *self = mapped.0;
+
+                    Ok(())
+                }
+            }
+        ),
+    );
+
+    Ok(quote! {
+        #is_default_impl
+
+        #protoscalar_impl
+
+        #protoencode_impl
+
+        #proto_impl
+
+        #protoencoderepeated_impl
+
+        #protomergerepeated_impl
+    })
+}
+
+fn derive_protoscalar_struct(
+    ident: &Ident,
+    generics: &Generics,
+    data: &DataStruct,
+) -> Result<TokenStream2> {
+    let (impl_generics, ty_generics, _) = generics.split_for_impl();
+
+    let (inner_field, bracket) = {
+        let (fields, bracket): (_, fn(_) -> _) = match data {
+            DataStruct {
+                fields: Fields::Named(FieldsNamed { named: fields, .. }),
+                ..
+            } => (fields, |toks| quote!({ #toks })),
+            DataStruct {
+                fields:
+                    Fields::Unnamed(FieldsUnnamed {
+                        unnamed: fields, ..
+                    }),
+                ..
+            } => (fields, |toks| quote!(( #toks ))),
+            DataStruct {
+                fields: Fields::Unit,
+                ..
+            } => {
+                bail!("`ProtoScalar` can only be implemented for `newtype` structs");
+            }
+        };
+
+        (
+            fields.first().ok_or_else(|| anyhow!("Programmer error"))?,
+            bracket,
+        )
+    };
+
+    let field: Member = inner_field
+        .ident
+        .clone()
+        .map(Member::Named)
+        .unwrap_or_else(|| Member::Unnamed(0.into()));
+
+    let mut where_clause_builder = WhereClauseBuilder::new(generics);
+    let (
+        is_default_impl,
+        protoscalar_impl,
+        protoencode_impl,
+        proto_impl,
+        protoencoderepeated_impl,
+        protomergerepeated_impl,
+    ) = (
+        newtype::is_default(
+            ident,
+            &field,
+            &impl_generics,
+            &ty_generics,
+            &mut where_clause_builder,
+        ),
+        newtype::protoscalar(
+            ident,
+            &field,
+            &inner_field.ty,
+            bracket,
+            &impl_generics,
+            &ty_generics,
+            &mut where_clause_builder,
+        ),
+        newtype::protoencode(
+            ident,
+            &field,
+            &impl_generics,
+            &ty_generics,
+            &mut where_clause_builder,
+        ),
+        newtype::proto(
+            ident,
+            &field,
+            &impl_generics,
+            &ty_generics,
+            &mut where_clause_builder,
+        ),
+        newtype::protoencoderepeated(
+            ident,
+            &field,
+            &inner_field.ty,
+            &impl_generics,
+            &ty_generics,
+            &mut where_clause_builder,
+        ),
+        newtype::protomergerepeated(
+            ident,
+            &field,
+            &inner_field.ty,
+            bracket,
+            &impl_generics,
+            &ty_generics,
+            &mut where_clause_builder,
+        ),
+    );
+
+    Ok(quote! {
+        #is_default_impl
+
+        #protoscalar_impl
+
+        #protoencode_impl
+
+        #proto_impl
+
+        #protoencoderepeated_impl
+
+        #protomergerepeated_impl
+    })
+}
+
+fn try_derive_protoscalar(input: TokenStream) -> Result<TokenStream2> {
+    let input: DeriveInput = syn::parse(input)?;
+    let DeriveInput {
+        attrs: _,
+        vis: _,
+        ident,
+        generics,
+        data,
+    } = &input;
+
+    match data {
+        Data::Struct(data) => derive_protoscalar_struct(ident, generics, data),
+        Data::Enum(data) => derive_protoscalar_enum(ident, generics, data),
+        Data::Union(_) => bail!("Cannot derive `ProtoScalar` for an untagged union"),
+    }
 }
 
 fn try_derive_is_default(input: TokenStream) -> Result<TokenStream2> {
@@ -266,20 +593,11 @@ fn try_derive_proto(input: TokenStream) -> Result<TokenStream2> {
 
     match data {
         Data::Struct(data) => try_derive_proto_for_struct(attrs, ident, generics, data),
-        Data::Enum(data) => try_derive_enum(attrs, ident, generics, data),
+        Data::Enum(..) => todo!(),
         Data::Union(..) => {
             bail!("Message can not be derived for an untagged union (try using `enum`)")
         }
     }
-}
-
-fn try_derive_enum(
-    _attrs: &[Attribute],
-    _ident: &Ident,
-    _generics: &Generics,
-    _data: &DataEnum,
-) -> Result<TokenStream2> {
-    todo!()
 }
 
 fn try_derive_oneof(
@@ -346,7 +664,7 @@ fn try_derive_oneof(
 
                 __proto_arg_func(
                     &#ident #variant_bindings,
-                    ::core::num::NonZeroU32::new(#tag).unwrap(),
+                    unsafe { ::core::num::NonZeroU32::new_unchecked(#tag) },
                 )
             }
         )
@@ -356,7 +674,7 @@ fn try_derive_oneof(
         syn::parse_quote!(
             Self::#ident #brackets => __proto_arg_func(
                 &(),
-                ::core::num::NonZeroU32::new(#tag).unwrap(),
+                unsafe { ::core::num::NonZeroU32::new_unchecked(#tag) },
             )
         )
     }
@@ -376,7 +694,7 @@ fn try_derive_oneof(
         syn::parse_quote!(
             Self::#ident #field_name_pat => __proto_arg_func(
                 #field_name,
-                ::core::num::NonZeroU32::new(#tag).unwrap(),
+                unsafe { ::core::num::NonZeroU32::new_unchecked(#tag) },
             )
         )
     }
@@ -649,12 +967,26 @@ fn try_derive_oneof(
         }
     }
 
+    let mut explicitly_tagged = None::<bool>;
+
     let variants = data
         .variants
         .iter()
         .enumerate()
         .map(|(i, variant)| {
             let attributes = FieldAttributes::new(&variant.attrs)?;
+
+            match (explicitly_tagged, &attributes.tag) {
+                (None, _) | (Some(true), Some(_)) | (Some(false), None) => {}
+                (Some(true), None) | (Some(false), Some(_)) => {
+                    return Err(anyhow!(
+                        "If `tag` is specified for one field it must be specified for all fields"
+                    ));
+                }
+            }
+
+            explicitly_tagged = Some(attributes.tag.is_some());
+
             let tag = attributes
                 .tag
                 .unwrap_or_else(|| NonZeroU32::new(i as u32 + 1).unwrap());
@@ -745,6 +1077,8 @@ fn try_derive_oneof(
             }
         }
 
+        impl #impl_generics ::autoproto::IsMessage for #ident #ty_generics #protooneof_where_clause {}
+
         #message_impl
 
         #proto_impl
@@ -761,10 +1095,23 @@ fn try_derive_protostruct<'a>(
 
     let num_fields = fields.len();
 
+    let mut explicitly_tagged = None::<bool>;
+
     let fields: Result<Vec<(NonZeroU32, Member)>> = fields
         .enumerate()
         .map(|(i, field)| {
             let attributes = FieldAttributes::new(&field.attrs)?;
+
+            match (explicitly_tagged, &attributes.tag) {
+                (None, _) | (Some(true), Some(_)) | (Some(false), None) => {}
+                (Some(true), None) | (Some(false), Some(_)) => {
+                    return Err(anyhow!(
+                        "If `tag` is specified for one field it must be specified for all fields"
+                    ));
+                }
+            }
+
+            explicitly_tagged = Some(attributes.tag.is_some());
 
             Ok((
                 attributes
@@ -787,7 +1134,7 @@ fn try_derive_protostruct<'a>(
 
             quote!(
                 (
-                    ::core::num::NonZeroU32::new(#tag).unwrap(),
+                    unsafe { ::core::num::NonZeroU32::new_unchecked(#tag) },
                     &self.#member as &dyn ::autoproto::ProtoEncode,
                 )
             )
@@ -846,6 +1193,8 @@ fn try_derive_protostruct<'a>(
     };
 
     Ok(quote! {
+        impl #impl_generics ::autoproto::IsMessage for #ident #ty_generics #protostruct_where_clause {}
+
         #immut
 
         #mutable
