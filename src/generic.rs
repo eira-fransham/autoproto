@@ -7,69 +7,86 @@
 //! The submodules are named for the traits required, and the free functions are
 //! prefixed with the trait that the method is found on.
 
-/// Because of the orphan rule, if we want to implement a trait on `&mut T`
-/// while also implementing it on `T: SomeTrait`, we need to have a custom wrapper
-/// type.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RefMut<'a, T>(pub &'a mut T);
+pub use wrapper::Wrapper;
 
-impl<T> std::ops::Deref for RefMut<'_, T> {
-    type Target = T;
+mod wrapper {
+    use crate::{Clear, IsDefault, Proto, ProtoEncode};
+    use std::ops::{Deref, DerefMut};
 
-    fn deref(&self) -> &Self::Target {
-        self.0
-    }
-}
+    /// Because of the orphan rule, if we want to implement a trait on `&T` or `&mut T`
+    /// while also implementing it on `T: SomeTrait`, we need to have a custom wrapper
+    /// type.
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    #[repr(transparent)]
+    pub struct Wrapper<T>(pub T);
 
-impl<T> std::ops::DerefMut for RefMut<'_, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.0
-    }
-}
+    impl<T> Deref for Wrapper<T>
+    where
+        T: Deref,
+    {
+        type Target = T::Target;
 
-impl<T> crate::Clear for RefMut<'_, T>
-where
-    T: crate::Clear,
-{
-    fn clear(&mut self) {
-        (**self).clear()
-    }
-}
-
-impl<T> crate::ProtoEncode for RefMut<'_, T>
-where
-    T: crate::ProtoEncode,
-{
-    fn encode_as_field(&self, tag: std::num::NonZeroU32, buf: &mut dyn prost::bytes::BufMut) {
-        (**self).encode_as_field(tag, buf)
+        fn deref(&self) -> &Self::Target {
+            &*self.0
+        }
     }
 
-    fn encoded_len_as_field(&self, tag: std::num::NonZeroU32) -> usize {
-        (**self).encoded_len_as_field(tag)
+    impl<T> DerefMut for Wrapper<T>
+    where
+        T: DerefMut,
+    {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut *self.0
+        }
     }
-}
 
-impl<T> crate::IsDefault for RefMut<'_, T>
-where
-    T: crate::IsDefault,
-{
-    fn is_default(&self) -> bool {
-        (**self).is_default()
+    impl<T> Clear for Wrapper<&'_ mut T>
+    where
+        T: Clear,
+    {
+        fn clear(&mut self) {
+            (**self).clear()
+        }
     }
-}
 
-impl<T> crate::Proto for RefMut<'_, T>
-where
-    T: crate::Proto,
-    Self: crate::Clear,
-{
-    fn merge_self(
-        &mut self,
-        wire_type: prost::encoding::WireType,
-        buf: &mut dyn prost::bytes::Buf,
-        ctx: prost::encoding::DecodeContext,
-    ) -> Result<(), prost::DecodeError> {
-        (**self).merge_self(wire_type, buf, ctx)
+    impl<T> ProtoEncode for Wrapper<T>
+    where
+        T: Deref,
+        T::Target: ProtoEncode,
+    {
+        fn encode_as_field(&self, tag: std::num::NonZeroU32, buf: &mut dyn prost::bytes::BufMut) {
+            (**self).encode_as_field(tag, buf)
+        }
+
+        fn encoded_len_as_field(&self, tag: std::num::NonZeroU32) -> usize {
+            (**self).encoded_len_as_field(tag)
+        }
+    }
+
+    impl<T> IsDefault for Wrapper<T>
+    where
+        T: Deref,
+        T::Target: IsDefault,
+    {
+        fn is_default(&self) -> bool {
+            (**self).is_default()
+        }
+    }
+
+    impl<T> Proto for Wrapper<T>
+    where
+        T: DerefMut,
+        T::Target: Proto,
+        Self: Clear,
+    {
+        fn merge_self(
+            &mut self,
+            wire_type: prost::encoding::WireType,
+            buf: &mut dyn prost::bytes::Buf,
+            ctx: prost::encoding::DecodeContext,
+        ) -> Result<(), prost::DecodeError> {
+            (**self).merge_self(wire_type, buf, ctx)
+        }
     }
 }
 

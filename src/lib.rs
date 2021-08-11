@@ -1,58 +1,5 @@
 #![feature(generic_associated_types)]
-
-//! This crate implements a custom derive macro for the `prost::Message` trait,
-//! along with including some helper traits to make automatic derivation as
-//! simple as possible - basically putting more information in the type system
-//! instead of in the macro implementation. If the macro doesn't do something
-//! that you need it to do, you can implement one of the "base traits" like
-//! `ProtoStruct` and `ProtoOneof` and use the functions in the `generic` module
-//! to implement the rest of the traits.
-//!
-//! One change from the `prost` macro is that either all fields must be tagged or
-//! no fields can be tagged. For example, these two are ok:
-//!
-//! ```rust
-//! # #![feature(generic_associated_types)]
-//!
-//! #[derive(Copy, Clone, PartialEq, Default, Debug, autoproto::Message)]
-//! struct SomeStructTagged<A, B, C, D, E> {
-//!     #[autoproto(tag = 1)]
-//!     a: A,
-//!     #[autoproto(tag = 2)]
-//!     b: B,
-//!     #[autoproto(tag = 3)]
-//!     c: C,
-//!     #[autoproto(tag = 4)]
-//!     d: D,
-//!     #[autoproto(tag = 5)]
-//!     e: E,
-//! }
-//!
-//! #[derive(Copy, Clone, PartialEq, Default, Debug, autoproto::Message)]
-//! struct SomeStruct<A, B, C, D, E> {
-//!     a: A,
-//!     b: B,
-//!     c: C,
-//!     d: D,
-//!     e: E,
-//! }
-//! ```
-//!
-//! But the following is not:
-//!
-//! ```rust,compile_fail
-//! # #![feature(generic_associated_types)]
-//!
-//! #[derive(Copy, Clone, PartialEq, Default, Debug, autoproto::Message)]
-//! struct SomeStruct<A, B, C, D, E> {
-//!     a: A,
-//!     b: B,
-//!     #[autoproto(tag = 1)]
-//!     c: C,
-//!     d: D,
-//!     e: E,
-//! }
-//! ```
+#![doc = include_str!("../README.md")]
 
 pub use autoproto_derive::{IsDefault, Message, Proto, ProtoEncode, ProtoScalar};
 
@@ -94,15 +41,6 @@ impl<T> IsDefault for PhantomData<T> {
 }
 
 impl<T> IsDefault for &'_ T
-where
-    T: IsDefault,
-{
-    fn is_default(&self) -> bool {
-        (**self).is_default()
-    }
-}
-
-impl<T> IsDefault for &'_ mut T
 where
     T: IsDefault,
 {
@@ -175,32 +113,6 @@ where
         Self: 'a,
     {
         iter.map(|i| i.encoded_len_as_field(tag)).sum()
-    }
-}
-
-impl<T> ProtoEncode for &'_ T
-where
-    T: ProtoEncode,
-{
-    fn encode_as_field(&self, tag: NonZeroU32, buf: &mut dyn bytes::BufMut) {
-        (**self).encode_as_field(tag, buf)
-    }
-
-    fn encoded_len_as_field(&self, tag: NonZeroU32) -> usize {
-        (**self).encoded_len_as_field(tag)
-    }
-}
-
-impl<T> ProtoEncode for &'_ mut T
-where
-    T: ProtoEncode,
-{
-    fn encode_as_field(&self, tag: NonZeroU32, buf: &mut dyn bytes::BufMut) {
-        (**self).encode_as_field(tag, buf)
-    }
-
-    fn encoded_len_as_field(&self, tag: NonZeroU32) -> usize {
-        (**self).encoded_len_as_field(tag)
     }
 }
 
@@ -436,6 +348,33 @@ pub trait ProtoScalar: IsDefault + Proto + Clone + Default + Sized {
 
     fn from_value(other: Value) -> Option<Self>;
     fn to_value(&self) -> Value;
+}
+
+impl<T> ProtoEncode for T
+where
+    T: prost::Message + IsMessage,
+{
+    fn encode_as_field(&self, tag: NonZeroU32, mut buf: &mut dyn bytes::BufMut) {
+        prost::encoding::message::encode(tag.get(), self, &mut buf);
+    }
+
+    fn encoded_len_as_field(&self, tag: ::core::num::NonZeroU32) -> usize {
+        prost::encoding::message::encoded_len(tag.get(), self)
+    }
+}
+
+impl<T> Proto for T
+where
+    T: prost::Message + IsMessage,
+{
+    fn merge_self(
+        &mut self,
+        wire_type: WireType,
+        mut buf: &mut dyn bytes::Buf,
+        ctx: DecodeContext,
+    ) -> Result<(), prost::DecodeError> {
+        prost::encoding::message::merge(wire_type, self, &mut buf, ctx)
+    }
 }
 
 #[derive(Copy, Clone, PartialEq, Debug)]

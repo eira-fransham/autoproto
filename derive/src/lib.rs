@@ -630,6 +630,13 @@ fn try_derive_oneof(
             })
             .collect::<Punctuated<_, Token!(,)>>();
 
+        let make_refs = names
+            .iter()
+            .map::<Expr, _>(|name| syn::parse_quote!(::autoproto::generic::Wrapper(#name)))
+            .collect::<Punctuated<_, Token!(,)>>();
+
+        let make_refs: Stmt = syn::parse_quote!(let (#names) = (#make_refs););
+
         let (typarams, dummy_fields): (Vec<Ident>, Punctuated<_, Token!(,)>) = fields
             .into_iter()
             .cloned()
@@ -661,6 +668,8 @@ fn try_derive_oneof(
             Self::#ident #variant_bindings => {
                 #[derive(::autoproto::ProtoEncode)]
                 struct #ident #dummy_generics #struct_body #semicolon
+
+                #make_refs
 
                 __proto_arg_func(
                     &#ident #variant_bindings,
@@ -801,7 +810,7 @@ fn try_derive_oneof(
         let ref_mut_construct: Stmt = {
             let construct = names
                 .iter()
-                .map::<Expr, _>(|name| syn::parse_quote!(::autoproto::generic::RefMut(#name)))
+                .map::<Expr, _>(|name| syn::parse_quote!(::autoproto::generic::Wrapper(#name)))
                 .collect::<Punctuated<_, Token!(,)>>();
             syn::parse_quote!(let (#names) = (#construct);)
         };
@@ -1015,7 +1024,7 @@ fn try_derive_oneof(
         ))
         .collect();
 
-    let mut where_clause_builder = WhereClauseBuilder::new(generics);
+    let where_clause_builder = WhereClauseBuilder::new(generics);
 
     let get_variant = ExprMatch {
         attrs: vec![],
@@ -1047,13 +1056,6 @@ fn try_derive_oneof(
         Some(&message_where_clause),
     );
 
-    let proto_impl = impl_proto_for_message(
-        ident,
-        &impl_generics,
-        &ty_generics,
-        &mut where_clause_builder,
-    );
-
     let protooneof_where_clause = where_clause_builder.with_bound(quote!(
         ::core::default::Default + ::autoproto::Proto + ::autoproto::Clear
     ));
@@ -1080,8 +1082,6 @@ fn try_derive_oneof(
         impl #impl_generics ::autoproto::IsMessage for #ident #ty_generics #protooneof_where_clause {}
 
         #message_impl
-
-        #proto_impl
     ))
 }
 
@@ -1334,7 +1334,7 @@ fn try_derive_message_for_struct(
 
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
-    let mut where_clause_builder = WhereClauseBuilder::new(generics);
+    let where_clause_builder = WhereClauseBuilder::new(generics);
 
     if attrs.transparent {
         let inner_field = match data {
@@ -1442,19 +1442,10 @@ fn try_derive_message_for_struct(
                         Some(&message_where_clause),
                     );
 
-                    let proto_impl = impl_proto_for_message(
-                        ident,
-                        &impl_generics,
-                        &ty_generics,
-                        &mut where_clause_builder,
-                    );
-
                     Ok(quote!(
                         #protostruct_impl
 
                         #message_impl
-
-                        #proto_impl
                     ))
                 }
             }
@@ -1469,45 +1460,6 @@ fn try_derive_message_for_struct(
             )),
         }
     }
-}
-
-fn impl_proto_for_message(
-    ident: &Ident,
-    impl_generics: &syn::ImplGenerics,
-    ty_generics: &syn::TypeGenerics,
-    where_clause_builder: &mut WhereClauseBuilder,
-) -> TokenStream2 {
-    let protoencode_where_clause = where_clause_builder
-        .build()
-        .with_self_bound(quote!(::autoproto::prost::Message));
-    let proto_where_clause = where_clause_builder.build().with_self_bound(quote!(
-        ::autoproto::prost::Message + ::autoproto::ProtoEncode + ::autoproto::Clear
-    ));
-
-    quote!(
-        impl #impl_generics ::autoproto::ProtoEncode for #ident #ty_generics #protoencode_where_clause
-        {
-            fn encode_as_field(&self, tag: ::core::num::NonZeroU32, mut buf: &mut dyn ::autoproto::prost::bytes::BufMut) {
-                ::autoproto::prost::encoding::message::encode(tag.get(), self, &mut buf);
-            }
-
-            fn encoded_len_as_field(&self, tag: ::core::num::NonZeroU32) -> usize {
-                ::autoproto::prost::encoding::message::encoded_len(tag.get(), self)
-            }
-        }
-
-        impl #impl_generics ::autoproto::Proto for #ident #ty_generics #proto_where_clause
-        {
-            fn merge_self(
-                &mut self,
-                wire_type: ::autoproto::prost::encoding::WireType,
-                mut buf: &mut dyn ::autoproto::prost::bytes::Buf,
-                ctx: ::autoproto::prost::encoding::DecodeContext,
-            ) -> Result<(), ::autoproto::prost::DecodeError> {
-                ::autoproto::prost::encoding::message::merge(wire_type, self, &mut buf, ctx)
-            }
-        }
-    )
 }
 
 fn impl_message_for_protooneof(
