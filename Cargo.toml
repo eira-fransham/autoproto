@@ -2,11 +2,17 @@
 name = "autoproto"
 version = "0.1.0"
 edition = "2018"
+description = "Replacement derive macros for `prost::Message`, and supporting traits and types to make implementing this trait easier"
+documentation = "https://docs.rs/autoproto"
+homepage = "https://github.com/Vurich/autoproto"
+repository = "https://github.com/Vurich/autoproto.git"
+license = "Unlicense"
+readme = "README.md"
 
 [dependencies]
 static_assertions = "1.1"
 prost = { version = "0.8", default-features = false }
-autoproto-derive = { path = "derive" }
+autoproto-derive = { version = "0.1", path = "derive" }
 smallvec = { version = "1.6", optional = true }
 arrayvec = { version = "0.7", optional = true }
 

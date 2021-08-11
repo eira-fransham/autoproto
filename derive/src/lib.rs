@@ -1,4 +1,4 @@
-#![feature(backtrace)]
+#![cfg_attr(feature = "nightly", feature(backtrace))]
 
 extern crate proc_macro;
 
@@ -20,6 +20,7 @@ use util::{FieldAttributes, MessageAttributes, Result, WhereClauseBuilder};
 
 #[proc_macro_derive(Message, attributes(autoproto))]
 pub fn derive_message(input: TokenStream) -> TokenStream {
+    #[cfg(feature = "nightly")]
     if cfg!(debug_assertions) {
         std::panic::set_hook(Box::new(|_panic_info| {
             eprintln!("{}", std::backtrace::Backtrace::capture());

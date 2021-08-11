@@ -2,6 +2,11 @@
 name = "autoproto-derive"
 version = "0.1.0"
 edition = "2018"
+homepage = "https://github.com/Vurich/autoproto"
+repository = "https://github.com/Vurich/autoproto.git"
+documentation = "https://docs.rs/autoproto-derive"
+description = "Derive macros for `autoproto`"
+license = "Unlicense"
 
 [lib]
 proc_macro = true
@@ -11,3 +16,6 @@ anyhow = "1"
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "1", features = ["full", "extra-traits"] }
+
+[features]
+nightly = []
