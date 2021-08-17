@@ -391,6 +391,14 @@ impl Value {
         }
     }
 
+    fn bool(self) -> Option<bool> {
+        self.int::<u8>().and_then(|i| match i {
+            0 => Some(false),
+            1 => Some(true),
+            _ => None,
+        })
+    }
+
     fn int<T: TryFrom<i128>>(self) -> Option<T> {
         match self {
             Self::Int(i) => i.try_into().ok(),
@@ -903,8 +911,14 @@ macro_rules! impl_is_default {
     };
 }
 
-impl_is_default!(u8, u16, u32, u64, i8, i16, i32, i64, usize, isize, f32, f64);
+impl_is_default!(bool, u8, u16, u32, u64, i8, i16, i32, i64, usize, isize, f32, f64);
 
+impl_protoscalar!(
+    bool,
+    (|v: Value| v.bool(), |v: bool| Value::Int((v as u64).into())),
+    Fixed::Fixed32,
+    Varint::U32
+);
 impl_protoscalar!(u8, Fixed::Fixed32, Varint::U32);
 impl_protoscalar!(u16, Fixed::Fixed32, Varint::U32);
 impl_protoscalar!(u32, Fixed::Fixed32, Varint::U32);
