@@ -1025,7 +1025,20 @@ fn try_derive_oneof(
         ))
         .collect();
 
-    let where_clause_builder = WhereClauseBuilder::new(generics);
+    let where_clause_builder = WhereClauseBuilder::with_field_types(
+        generics,
+        data.variants
+            .iter()
+            .filter_map(|v| match &v.fields {
+                Fields::Named(FieldsNamed { named: fields, .. })
+                | Fields::Unnamed(FieldsUnnamed {
+                    unnamed: fields, ..
+                }) => Some(fields),
+                Fields::Unit => None,
+            })
+            .flatten()
+            .map(|field| &field.ty),
+    );
 
     let get_variant = ExprMatch {
         attrs: vec![],
@@ -1044,7 +1057,7 @@ fn try_derive_oneof(
     };
 
     let message_where_clause = where_clause_builder
-        .with_bound(quote!(::core::marker::Send + ::core::marker::Sync))
+        .with_field_bound(quote!(::core::marker::Send + ::core::marker::Sync))
         .with_self_bound(quote!(
             ::autoproto::ProtoOneof
                 + ::autoproto::Clear
