@@ -1043,13 +1043,15 @@ fn try_derive_oneof(
         arms: variant_exec_merge,
     };
 
-    let message_where_clause = where_clause_builder.with_self_bound(quote!(
-        ::autoproto::ProtoOneof
-            + ::autoproto::Clear
-            + ::core::fmt::Debug
-            + ::core::marker::Send
-            + ::core::marker::Sync
-    ));
+    let message_where_clause = where_clause_builder
+        .with_bound(quote!(::core::marker::Send + ::core::marker::Sync))
+        .with_self_bound(quote!(
+            ::autoproto::ProtoOneof
+                + ::autoproto::Clear
+                + ::core::fmt::Debug
+                + ::core::marker::Send
+                + ::core::marker::Sync
+        ));
     let message_impl = impl_message_for_protooneof(
         ident,
         &impl_generics,
@@ -1335,8 +1337,6 @@ fn try_derive_message_for_struct(
 
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
-    let where_clause_builder = WhereClauseBuilder::new(generics);
-
     if attrs.transparent {
         let inner_field = match data {
             DataStruct {
@@ -1422,6 +1422,11 @@ fn try_derive_message_for_struct(
                         where_clause,
                     ))
                 } else {
+                    let where_clause_builder = WhereClauseBuilder::with_field_types(
+                        generics,
+                        fields.iter().map(|f| &f.ty),
+                    );
+
                     let protostruct_impl = try_derive_protostruct(
                         fields.into_iter(),
                         ident,
@@ -1429,13 +1434,15 @@ fn try_derive_message_for_struct(
                         Default::default(),
                     )?;
 
-                    let message_where_clause = where_clause_builder.with_self_bound(quote!(
-                        ::autoproto::ProtoStructMut
-                            + ::autoproto::Clear
-                            + ::core::fmt::Debug
-                            + ::core::marker::Send
-                            + ::core::marker::Sync
-                    ));
+                    let message_where_clause = where_clause_builder
+                        .with_field_bound(quote!(::core::marker::Send + ::core::marker::Sync))
+                        .with_self_bound(quote!(
+                            ::autoproto::ProtoStructMut
+                                + ::autoproto::Clear
+                                + ::core::fmt::Debug
+                                + ::core::marker::Send
+                                + ::core::marker::Sync
+                        ));
                     let message_impl = impl_message_for_protostruct(
                         ident,
                         &impl_generics,

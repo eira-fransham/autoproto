@@ -961,8 +961,6 @@ impl_protoscalar!(
 );
 
 impl_proto_for_message!(impl Proto for ());
-impl_proto_for_message!(impl Proto for bytes::Bytes);
-impl_proto_for_message!(impl Proto for String);
 
 impl_proto_for_protomap!(
     impl<K, V> Proto for BTreeMap<K, V>
@@ -1021,6 +1019,119 @@ impl_proto_for_protorepeated!(
     where
         T: 'static
 );
+
+impl_proto_for_bytes!(impl<;const LEN: usize> Proto for [u8; LEN]);
+impl_proto_for_bytes!(impl Proto for [u8]);
+impl_proto_for_bytes!(impl Proto for Box<[u8]>);
+impl_proto_for_bytes!(impl Proto for bytes::BytesMut);
+
+impl ProtoEncode for bytes::Bytes {
+    fn encode_as_field(&self, tag: NonZeroU32, mut buf: &mut dyn bytes::BufMut) {
+        prost::encoding::encode_key(tag.get(), WireType::LengthDelimited, &mut buf);
+        prost::encoding::encode_varint(self.len() as u64, &mut buf);
+        buf.put_slice(&*self);
+    }
+
+    fn encoded_len_as_field(&self, tag: NonZeroU32) -> usize {
+        prost::encoding::key_len(tag.get())
+            + prost::encoding::encoded_len_varint(self.len() as u64)
+            + self.len()
+    }
+}
+
+impl Proto for bytes::Bytes {
+    fn merge_self(
+        &mut self,
+        wire_type: WireType,
+        buf: &mut dyn bytes::Buf,
+        ctx: DecodeContext,
+    ) -> Result<(), prost::DecodeError> {
+        let mut bytes = bytes::BytesMut::from(&**self);
+
+        bytes.merge_self(wire_type, buf, ctx)?;
+
+        *self = bytes.freeze();
+
+        Ok(())
+    }
+}
+
+impl ProtoEncode for String {
+    fn encode_as_field(&self, tag: NonZeroU32, mut buf: &mut dyn bytes::BufMut) {
+        prost::encoding::encode_key(tag.get(), WireType::LengthDelimited, &mut buf);
+        prost::encoding::encode_varint(self.len() as u64, &mut buf);
+        buf.put_slice(self.as_bytes());
+    }
+
+    fn encoded_len_as_field(&self, tag: NonZeroU32) -> usize {
+        let len = self.len();
+
+        prost::encoding::key_len(tag.get()) + prost::encoding::encoded_len_varint(len as u64) + len
+    }
+}
+
+impl Proto for String {
+    fn merge_self(
+        &mut self,
+        _wire_type: prost::encoding::WireType,
+        mut buf: &mut dyn prost::bytes::Buf,
+        _ctx: prost::encoding::DecodeContext,
+    ) -> Result<(), prost::DecodeError> {
+        let len = prost::encoding::decode_varint(&mut buf)? as usize;
+        // There is currently no good way to extend a string from a UTF8 byte iterator,
+        // so we must allocate.
+        let bytes = buf.copy_to_bytes(len);
+        let validated =
+            std::str::from_utf8(&bytes).map_err(|e| prost::DecodeError::new(e.to_string()))?;
+
+        self.push_str(validated);
+
+        Ok(())
+    }
+}
+
+impl IsDefault for String {
+    fn is_default(&self) -> bool {
+        <Self as ::core::convert::AsRef<[u8]>>::as_ref(self).is_empty()
+    }
+}
+
+#[cfg(feature = "uuid")]
+mod uuid_impl {
+    use prost::{
+        bytes,
+        encoding::{DecodeContext, WireType},
+    };
+    use std::num::NonZeroU32;
+    use uuid::Uuid;
+
+    impl crate::ProtoEncode for Uuid {
+        fn encode_as_field(&self, tag: NonZeroU32, buf: &mut dyn bytes::BufMut) {
+            self.as_bytes().encode_as_field(tag, buf)
+        }
+
+        fn encoded_len_as_field(&self, tag: NonZeroU32) -> usize {
+            self.as_bytes().encoded_len_as_field(tag)
+        }
+    }
+
+    impl crate::Proto for Uuid {
+        fn merge_self(
+            &mut self,
+            wire_type: WireType,
+            buf: &mut dyn bytes::Buf,
+            ctx: DecodeContext,
+        ) -> Result<(), prost::DecodeError> {
+            let mut bytes = self.as_bytes().clone();
+
+            bytes.merge_self(wire_type, buf, ctx)?;
+
+            *self = Uuid::from_bytes(bytes);
+
+            Ok(())
+        }
+    }
+}
 
 #[cfg(feature = "arrayvec")]
 impl_proto_for_protorepeated!(

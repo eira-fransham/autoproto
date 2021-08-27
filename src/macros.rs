@@ -1,4 +1,65 @@
 #[macro_export]
+macro_rules! impl_proto_for_bytes {
+    (
+        impl$(<$($pname:ident),*$(; $(const $cname:ident : $cty:ty),*)?>)? Proto for $t:ty
+        $(where $($bounded:ty : $bound:path,)* $(where $($lbounded:ty : $lbound:lifetime),*)?)?
+    ) => {
+        impl$(<$($pname,)* $($(const $cname : $cty),*)?>)? $crate::ProtoEncode for $t
+        $(where $($bounded : $bound,)* $($($lbounded : $lbound),*)?)?
+        {
+            fn encode_as_field(&self, tag: NonZeroU32, mut buf: &mut dyn bytes::BufMut) {
+                let len = <Self as ::core::convert::AsRef<[u8]>>::as_ref(self).len();
+
+                $crate::prost::encoding::encode_key(tag.get(), WireType::LengthDelimited, &mut buf);
+                $crate::prost::encoding::encode_varint(len as u64, &mut buf);
+                buf.put_slice(<Self as ::core::convert::AsRef<[u8]>>::as_ref(self));
+            }
+
+            fn encoded_len_as_field(&self, tag: NonZeroU32) -> usize {
+                let len = <Self as ::core::convert::AsRef<[u8]>>::as_ref(self).len();
+
+                $crate::prost::encoding::key_len(tag.get())
+                    + $crate::prost::encoding::encoded_len_varint(len as u64)
+                    + len
+            }
+        }
+
+        impl$(<$($pname,)* $($(const $cname : $cty),*)?>)? $crate::Proto for $t
+        $(where $($bounded : $bound,)* $($($lbounded : $lbound),*)?)?
+        {
+            fn merge_self(
+                &mut self,
+                wire_type: $crate::prost::encoding::WireType,
+                mut buf: &mut dyn $crate::prost::bytes::Buf,
+                _ctx: $crate::prost::encoding::DecodeContext,
+            ) -> Result<(), $crate::prost::DecodeError> {
+                use crate::bytes::Buf as _;
+
+                $crate::prost::encoding::check_wire_type(WireType::LengthDelimited, wire_type)?;
+                let len = $crate::prost::encoding::decode_varint(&mut buf)?;
+                if len > buf.remaining() as u64 {
+                    return Err($crate::prost::DecodeError::new("buffer underflow"));
+                }
+
+                <&mut &mut dyn $crate::bytes::Buf as $crate::bytes::Buf>::take(
+                    &mut buf,
+                    len as usize,
+                ).copy_to_slice(<Self as ::core::convert::AsMut<[u8]>>::as_mut(self));
+                Ok(())
+            }
+        }
+
+        impl$(<$($pname,)* $($(const $cname : $cty),*)?>)? $crate::IsDefault for $t
+        $(where $($bounded : $bound,)* $($($lbounded : $lbound),*)?)?
+        {
+            fn is_default(&self) -> bool {
+                <Self as ::core::convert::AsRef<[u8]>>::as_ref(self).is_empty()
+            }
+        }
+    }
+}
+
+#[macro_export]
 macro_rules! impl_proto_for_message {
     (
         impl$(<$($pname:ident),*$(; $(const $cname:ident : $cty:ty),*)?>)? Proto for $t:ty
