@@ -1,5 +1,5 @@
 use anyhow::{anyhow, bail};
-use proc_macro2::TokenStream as TokenStream2;
+use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::ToTokens;
 use std::{
     borrow::{Borrow, Cow},
@@ -7,7 +7,7 @@ use std::{
 };
 use syn::{
     punctuated::Punctuated, Attribute, GenericParam, Generics, Ident, Lit, LitBool, Meta, MetaList,
-    NestedMeta, Type, WhereClause, WherePredicate,
+    NestedMeta, Path, Type, WhereClause, WherePredicate,
 };
 
 pub type Result<T> = std::result::Result<T, anyhow::Error>;
@@ -18,13 +18,13 @@ pub struct WhereClauseBuilder<Fields = ()> {
     where_clause: WhereClause,
 }
 
-impl<Fields> WhereClauseBuilder<Fields> {
-    pub fn with_field_types(generics: &Generics, field_types: Fields) -> Self {
+impl<OldFields> WhereClauseBuilder<OldFields> {
+    pub fn with_field_types<Fields>(self, field_types: Fields) -> WhereClauseBuilder<Fields> {
         let WhereClauseBuilder {
             type_params,
             where_clause,
-            field_types: (),
-        } = WhereClauseBuilder::new(generics);
+            field_types: _,
+        } = self;
 
         WhereClauseBuilder {
             type_params,
@@ -183,9 +183,15 @@ impl FieldAttributes {
 
         for meta in attrs
             .iter()
-            .filter_map(|attr| match attr.parse_meta().ok()? {
-                Meta::List(MetaList { nested: inner, .. }) => Some(inner),
-                _ => None,
+            .filter_map(|attr| {
+                if attr.path.get_ident()? != "autoproto" {
+                    return None;
+                }
+
+                match attr.parse_meta().ok()? {
+                    Meta::List(MetaList { nested: inner, .. }) => Some(inner),
+                    _ => None,
+                }
             })
             .flatten()
         {
@@ -216,47 +222,87 @@ impl FieldAttributes {
 #[derive(Debug)]
 pub struct MessageAttributes {
     pub transparent: bool,
+    pub autoproto_path: Path,
 }
 
 impl MessageAttributes {
     pub fn new(attrs: &[Attribute]) -> Result<Self> {
         let mut transparent = false;
+        let mut autoproto_path = syn::parse_quote!(::autoproto);
 
         for meta in attrs
             .iter()
-            .filter_map(|attr| match attr.parse_meta().ok()? {
-                Meta::List(MetaList { nested: inner, .. }) => Some(inner),
-                _ => None,
+            .filter_map(|attr| {
+                if attr.path.get_ident()? != "autoproto" {
+                    return None;
+                }
+
+                match attr.parse_meta().ok()? {
+                    Meta::List(MetaList { nested: inner, .. }) => Some(inner),
+                    _ => None,
+                }
             })
             .flatten()
         {
             if let NestedMeta::Meta(meta) = meta {
+                let lit;
                 let (ident, value) = match &meta {
                     Meta::Path(inner) => {
                         if let Some(ident) = inner.get_ident() {
-                            (ident, true)
+                            lit = Lit::Bool(LitBool {
+                                value: true,
+                                span: Span::call_site(),
+                            });
+
+                            (ident, Ok(&lit))
                         } else {
                             continue;
                         }
                     }
                     Meta::NameValue(inner) => {
-                        if let (Some(ident), Lit::Bool(LitBool { value, .. })) =
-                            (inner.path.get_ident(), &inner.lit)
-                        {
-                            (ident, *value)
+                        if let Some(ident) = inner.path.get_ident() {
+                            (ident, Ok(&inner.lit))
                         } else {
                             continue;
                         }
                     }
-                    _ => continue,
+                    Meta::List(MetaList { path, nested, .. }) => {
+                        if nested.len() != 1 {
+                            bail!("`{}` requires exactly one argument", path.to_token_stream());
+                        }
+
+                        if let Some(ident) = path.get_ident() {
+                            match nested.first() {
+                                Some(NestedMeta::Meta(Meta::Path(path))) => {
+                                    (ident, Err(path.clone()))
+                                }
+                                _ => unreachable!(),
+                            }
+                        } else {
+                            continue;
+                        }
+                    }
                 };
 
                 if ident == "transparent" {
-                    transparent = value;
+                    transparent = match value {
+                        Ok(Lit::Bool(LitBool { value, .. })) => *value,
+                        _ => bail!("Invalid value for `transparent`"),
+                    };
+                }
+
+                if ident == "path" {
+                    autoproto_path = match value {
+                        Err(path) => path,
+                        _ => bail!("Invalid value for `autoproto_path`"),
+                    };
                 }
             }
         }
 
-        Ok(Self { transparent })
+        Ok(Self {
+            transparent,
+            autoproto_path,
+        })
     }
 }

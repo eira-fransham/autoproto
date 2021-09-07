@@ -7,7 +7,7 @@ macro_rules! impl_proto_for_bytes {
         impl$(<$($pname,)* $($(const $cname : $cty),*)?>)? $crate::ProtoEncode for $t
         $(where $($bounded : $bound,)* $($($lbounded : $lbound),*)?)?
         {
-            fn encode_as_field(&self, tag: NonZeroU32, mut buf: &mut dyn bytes::BufMut) {
+            fn encode_as_field(&self, tag: ::core::num::NonZeroU32, mut buf: &mut dyn $crate::prost::bytes::BufMut) {
                 let len = <Self as ::core::convert::AsRef<[u8]>>::as_ref(self).len();
 
                 $crate::prost::encoding::encode_key(tag.get(), WireType::LengthDelimited, &mut buf);
@@ -15,7 +15,7 @@ macro_rules! impl_proto_for_bytes {
                 buf.put_slice(<Self as ::core::convert::AsRef<[u8]>>::as_ref(self));
             }
 
-            fn encoded_len_as_field(&self, tag: NonZeroU32) -> usize {
+            fn encoded_len_as_field(&self, tag: ::core::num::NonZeroU32) -> usize {
                 let len = <Self as ::core::convert::AsRef<[u8]>>::as_ref(self).len();
 
                 $crate::prost::encoding::key_len(tag.get())

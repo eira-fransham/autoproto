@@ -10,7 +10,7 @@ use std::{iter, num::NonZeroU32};
 use syn::{
     punctuated::Punctuated, Arm, Attribute, Block, Data, DataEnum, DataStruct, DeriveInput, Expr,
     ExprMatch, Field, Fields, FieldsNamed, FieldsUnnamed, GenericParam, Generics, Ident, ItemConst,
-    ItemImpl, ItemStruct, Lit, LitInt, Member, Stmt, Token, Type, TypePath,
+    ItemImpl, ItemStruct, Lit, LitInt, Member, Path, Stmt, Token, Type, TypePath,
 };
 
 mod newtype;
@@ -51,11 +51,14 @@ pub fn derive_is_default(input: TokenStream) -> TokenStream {
 }
 
 fn derive_protoscalar_enum(
+    attrs: MessageAttributes,
     ident: &Ident,
     generics: &Generics,
     data: &DataEnum,
 ) -> Result<TokenStream2> {
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+
+    let autoproto_path = &attrs.autoproto_path;
 
     let variant_constants = data
         .variants
@@ -97,53 +100,53 @@ fn derive_protoscalar_enum(
         proto_impl,
     ): (ItemImpl, ItemImpl, ItemImpl, ItemImpl, ItemImpl, ItemImpl) = (
         syn::parse_quote!(
-            impl #impl_generics ::autoproto::ProtoScalar for #ident #ty_generics #where_clause {
-                const DEFAULT_FIXED: ::autoproto::Fixed =
-                    <::core::primitive::i32 as ::autoproto::ProtoScalar>::DEFAULT_FIXED;
-                const DEFAULT_VARINT: ::autoproto::Varint =
-                    <::core::primitive::i32 as ::autoproto::ProtoScalar>::DEFAULT_VARINT;
-                const DEFAULT_ENCODING: ::autoproto::ScalarEncoding =
-                    <::core::primitive::i32 as ::autoproto::ProtoScalar>::DEFAULT_ENCODING;
+            impl #impl_generics #autoproto_path::ProtoScalar for #ident #ty_generics #where_clause {
+                const DEFAULT_FIXED: #autoproto_path::Fixed =
+                    <::core::primitive::i32 as #autoproto_path::ProtoScalar>::DEFAULT_FIXED;
+                const DEFAULT_VARINT: #autoproto_path::Varint =
+                    <::core::primitive::i32 as #autoproto_path::ProtoScalar>::DEFAULT_VARINT;
+                const DEFAULT_ENCODING: #autoproto_path::ScalarEncoding =
+                    <::core::primitive::i32 as #autoproto_path::ProtoScalar>::DEFAULT_ENCODING;
 
-                fn from_value(other: ::autoproto::Value) -> Option<Self> {
+                fn from_value(other: #autoproto_path::Value) -> Option<Self> {
                     ::core::debug_assert_eq!(<Self as ::core::default::Default>::default() as i32, 0);
 
                     #(#constant_items)*
 
-                    Some(match <::core::primitive::i32 as ::autoproto::ProtoScalar>::from_value(other)? {
+                    Some(match <::core::primitive::i32 as #autoproto_path::ProtoScalar>::from_value(other)? {
                         #match_arms,
                         _ => return None,
                     })
                 }
 
-                fn to_value(&self) -> ::autoproto::Value {
+                fn to_value(&self) -> #autoproto_path::Value {
                     ::core::debug_assert_eq!(<Self as ::core::default::Default>::default() as i32, 0);
 
-                    <::core::primitive::i32 as ::autoproto::ProtoScalar>::to_value(
+                    <::core::primitive::i32 as #autoproto_path::ProtoScalar>::to_value(
                         &(::core::clone::Clone::clone(self) as ::core::primitive::i32)
                     )
                 }
             }
         ),
         syn::parse_quote!(
-            impl #impl_generics ::autoproto::IsDefault for #ident #ty_generics #where_clause {
+            impl #impl_generics #autoproto_path::IsDefault for #ident #ty_generics #where_clause {
                 fn is_default(&self) -> ::core::primitive::bool {
                     (::core::clone::Clone::clone(self) as ::core::primitive::i32) == 0
                 }
             }
         ),
         syn::parse_quote!(
-            impl #impl_generics ::autoproto::ProtoEncode for #ident #ty_generics #where_clause {
+            impl #impl_generics #autoproto_path::ProtoEncode for #ident #ty_generics #where_clause {
                 fn encode_as_field(
                     &self,
                     tag: ::core::num::NonZeroU32,
-                    buf: &mut dyn ::autoproto::prost::bytes::BufMut,
+                    buf: &mut dyn #autoproto_path::prost::bytes::BufMut,
                 ) {
                     <
-                        ::autoproto::MappedInt::<Self>
-                        as ::autoproto::ProtoEncode
+                        #autoproto_path::MappedInt::<Self>
+                        as #autoproto_path::ProtoEncode
                     >::encode_as_field(
-                        &::autoproto::MappedInt::new(::core::clone::Clone::clone(self)),
+                        &#autoproto_path::MappedInt::new(::core::clone::Clone::clone(self)),
                         tag,
                         buf,
                     )
@@ -151,27 +154,27 @@ fn derive_protoscalar_enum(
 
                 fn encoded_len_as_field(&self, tag: ::core::num::NonZeroU32) -> usize {
                     <
-                        ::autoproto::MappedInt::<Self>
-                        as ::autoproto::ProtoEncode
+                        #autoproto_path::MappedInt::<Self>
+                        as #autoproto_path::ProtoEncode
                     >::encoded_len_as_field(
-                        &::autoproto::MappedInt::new(::core::clone::Clone::clone(self)),
+                        &#autoproto_path::MappedInt::new(::core::clone::Clone::clone(self)),
                         tag,
                     )
                 }
             }
         ),
         syn::parse_quote!(
-            impl #impl_generics ::autoproto::ProtoEncodeRepeated for #ident #ty_generics #where_clause {
+            impl #impl_generics #autoproto_path::ProtoEncodeRepeated for #ident #ty_generics #where_clause {
                 fn encode_as_field_repeated<'__lifetime, I>(
                     iter: I,
                     tag: ::core::num::NonZeroU32,
-                    buf: &mut dyn ::autoproto::bytes::BufMut,
+                    buf: &mut dyn #autoproto_path::bytes::BufMut,
                 )
                 where
                     I: ExactSizeIterator<Item = &'__lifetime Self> + Clone,
                     Self: '__lifetime,
                 {
-                    ::autoproto::MappedInt::<Self>::encode_as_field_repeated(
+                    #autoproto_path::MappedInt::<Self>::encode_as_field_repeated(
                         iter,
                         tag,
                         buf,
@@ -183,25 +186,25 @@ fn derive_protoscalar_enum(
                     I: ExactSizeIterator<Item = &'__lifetime Self>,
                     Self: '__lifetime,
                 {
-                    ::autoproto::MappedInt::<Self>::encoded_len_as_field_repeated(
+                    #autoproto_path::MappedInt::<Self>::encoded_len_as_field_repeated(
                         iter,
                         tag,
                     )
                 }
         }),
         syn::parse_quote!(
-            impl #impl_generics ::autoproto::ProtoMergeRepeated for #ident #ty_generics #where_clause {
+            impl #impl_generics #autoproto_path::ProtoMergeRepeated for #ident #ty_generics #where_clause {
                 fn merge_repeated<T>(
                     values: &mut T,
-                    wire_type: ::autoproto::prost::encoding::WireType,
-                    buf: &mut dyn ::autoproto::bytes::Buf,
-                    ctx: ::autoproto::prost::encoding::DecodeContext,
-                ) -> Result<(), ::autoproto::prost::DecodeError>
+                    wire_type: #autoproto_path::prost::encoding::WireType,
+                    buf: &mut dyn #autoproto_path::bytes::Buf,
+                    ctx: #autoproto_path::prost::encoding::DecodeContext,
+                ) -> Result<(), #autoproto_path::prost::DecodeError>
                 where
                     T: std::iter::Extend<Self>,
                 {
-                    <::autoproto::MappedInt::<Self> as ::autoproto::ProtoMergeRepeated>::merge_repeated(
-                        &mut ::autoproto::MapExtend::new(values, |::autoproto::MappedInt(i, _)| i),
+                    <#autoproto_path::MappedInt::<Self> as #autoproto_path::ProtoMergeRepeated>::merge_repeated(
+                        &mut #autoproto_path::MapExtend::new(values, |#autoproto_path::MappedInt(i, _)| i),
                         wire_type,
                         buf,
                         ctx,
@@ -210,15 +213,15 @@ fn derive_protoscalar_enum(
             }
         ),
         syn::parse_quote!(
-            impl #impl_generics ::autoproto::Proto for #ident #ty_generics #where_clause {
+            impl #impl_generics #autoproto_path::Proto for #ident #ty_generics #where_clause {
                 fn merge_self(
                     &mut self,
-                    wire_type: ::autoproto::prost::encoding::WireType,
-                    buf: &mut dyn ::autoproto::prost::bytes::Buf,
-                    ctx: ::autoproto::prost::encoding::DecodeContext,
-                ) -> Result<(), ::autoproto::prost::DecodeError> {
-                    let mut mapped = ::autoproto::MappedInt::<Self>::new(::core::clone::Clone::clone(self));
-                    ::autoproto::Proto::merge_self(&mut mapped, wire_type, buf, ctx)?;
+                    wire_type: #autoproto_path::prost::encoding::WireType,
+                    buf: &mut dyn #autoproto_path::prost::bytes::Buf,
+                    ctx: #autoproto_path::prost::encoding::DecodeContext,
+                ) -> Result<(), #autoproto_path::prost::DecodeError> {
+                    let mut mapped = #autoproto_path::MappedInt::<Self>::new(::core::clone::Clone::clone(self));
+                    #autoproto_path::Proto::merge_self(&mut mapped, wire_type, buf, ctx)?;
 
                     *self = mapped.0;
 
@@ -244,11 +247,14 @@ fn derive_protoscalar_enum(
 }
 
 fn derive_protoscalar_struct(
+    attrs: MessageAttributes,
     ident: &Ident,
     generics: &Generics,
     data: &DataStruct,
 ) -> Result<TokenStream2> {
     let (impl_generics, ty_generics, _) = generics.split_for_impl();
+
+    let autoproto_path = &attrs.autoproto_path;
 
     let (inner_field, bracket) = {
         let (fields, bracket): (_, fn(_) -> _) = match data {
@@ -293,6 +299,7 @@ fn derive_protoscalar_struct(
         protomergerepeated_impl,
     ) = (
         newtype::is_default(
+            autoproto_path,
             ident,
             &field,
             &impl_generics,
@@ -300,6 +307,7 @@ fn derive_protoscalar_struct(
             &mut where_clause_builder,
         ),
         newtype::protoscalar(
+            autoproto_path,
             ident,
             &field,
             &inner_field.ty,
@@ -309,6 +317,7 @@ fn derive_protoscalar_struct(
             &mut where_clause_builder,
         ),
         newtype::protoencode(
+            autoproto_path,
             ident,
             &field,
             &impl_generics,
@@ -316,6 +325,7 @@ fn derive_protoscalar_struct(
             &mut where_clause_builder,
         ),
         newtype::proto(
+            autoproto_path,
             ident,
             &field,
             &impl_generics,
@@ -323,6 +333,7 @@ fn derive_protoscalar_struct(
             &mut where_clause_builder,
         ),
         newtype::protoencoderepeated(
+            autoproto_path,
             ident,
             &field,
             &inner_field.ty,
@@ -331,6 +342,7 @@ fn derive_protoscalar_struct(
             &mut where_clause_builder,
         ),
         newtype::protomergerepeated(
+            autoproto_path,
             ident,
             &field,
             &inner_field.ty,
@@ -359,16 +371,18 @@ fn derive_protoscalar_struct(
 fn try_derive_protoscalar(input: TokenStream) -> Result<TokenStream2> {
     let input: DeriveInput = syn::parse(input)?;
     let DeriveInput {
-        attrs: _,
+        attrs,
         vis: _,
         ident,
         generics,
         data,
     } = &input;
 
+    let attrs = MessageAttributes::new(attrs)?;
+
     match data {
-        Data::Struct(data) => derive_protoscalar_struct(ident, generics, data),
-        Data::Enum(data) => derive_protoscalar_enum(ident, generics, data),
+        Data::Struct(data) => derive_protoscalar_struct(attrs, ident, generics, data),
+        Data::Enum(data) => derive_protoscalar_enum(attrs, ident, generics, data),
         Data::Union(_) => bail!("Cannot derive `ProtoScalar` for an untagged union"),
     }
 }
@@ -424,6 +438,7 @@ fn try_derive_is_default(input: TokenStream) -> Result<TokenStream2> {
 
         let mut where_clause_builder = WhereClauseBuilder::new(generics);
         let is_default_impl = newtype::is_default(
+            &attrs.autoproto_path,
             ident,
             &field,
             &impl_generics,
@@ -437,12 +452,14 @@ fn try_derive_is_default(input: TokenStream) -> Result<TokenStream2> {
         let where_clause = where_clause_builder
             .with_self_bound(quote!(::core::default::Default + ::core::cmp::PartialEq));
 
+        let autoproto_path = &attrs.autoproto_path;
+
         Ok(quote! {
-            impl #impl_generics ::autoproto::IsDefault for #ident #ty_generics
+            impl #impl_generics #autoproto_path::IsDefault for #ident #ty_generics
             #where_clause
             {
                 fn is_default(&self) -> bool {
-                    ::autoproto::generic::default::is_default(self)
+                    #autoproto_path::generic::default::is_default(self)
                 }
             }
         })
@@ -471,6 +488,8 @@ fn try_derive_protoencode(input: TokenStream) -> Result<TokenStream2> {
     } = &input;
 
     let attrs = MessageAttributes::new(attrs)?;
+
+    let autoproto_path = &attrs.autoproto_path;
 
     if attrs.transparent {
         let inner_field = match data {
@@ -511,6 +530,7 @@ fn try_derive_protoencode(input: TokenStream) -> Result<TokenStream2> {
 
         let mut where_clause_builder = WhereClauseBuilder::new(generics);
         let protoencode_impl = newtype::protoencode(
+            &attrs.autoproto_path,
             ident,
             &field,
             &impl_generics,
@@ -533,6 +553,7 @@ fn try_derive_protoencode(input: TokenStream) -> Result<TokenStream2> {
                 ..
             }) => {
                 let protostruct_impl = try_derive_protostruct(
+                    autoproto_path,
                     fields.into_iter(),
                     ident,
                     generics,
@@ -542,6 +563,7 @@ fn try_derive_protoencode(input: TokenStream) -> Result<TokenStream2> {
                 let (impl_generics, ty_generics, _) = generics.split_for_impl();
 
                 let protoencode_impl = impl_protoencode_for_protostruct(
+                    autoproto_path,
                     ident,
                     &impl_generics,
                     &ty_generics,
@@ -602,12 +624,13 @@ fn try_derive_proto(input: TokenStream) -> Result<TokenStream2> {
 }
 
 fn try_derive_oneof(
-    _attrs: &[Attribute],
+    attrs: &[Attribute],
     ident: &Ident,
     generics: &Generics,
     data: &DataEnum,
 ) -> Result<TokenStream2> {
     fn make_variant_get_field_arm_with_fields<F, T, FIter>(
+        autoproto_path: &Path,
         ident: &Ident,
         tag: &Lit,
         generics: &Generics,
@@ -633,7 +656,7 @@ fn try_derive_oneof(
 
         let make_refs = names
             .iter()
-            .map::<Expr, _>(|name| syn::parse_quote!(::autoproto::generic::Wrapper(#name)))
+            .map::<Expr, _>(|name| syn::parse_quote!(#autoproto_path::generic::Wrapper(#name)))
             .collect::<Punctuated<_, Token!(,)>>();
 
         let make_refs: Stmt = syn::parse_quote!(let (#names) = (#make_refs););
@@ -667,7 +690,7 @@ fn try_derive_oneof(
 
         syn::parse_quote!(
             Self::#ident #variant_bindings => {
-                #[derive(::autoproto::ProtoEncode)]
+                #[derive(#autoproto_path::ProtoEncode)]
                 struct #ident #dummy_generics #struct_body #semicolon
 
                 #make_refs
@@ -710,6 +733,7 @@ fn try_derive_oneof(
     }
 
     fn make_variant_get_field_arm(
+        autoproto_path: &Path,
         ident: &Ident,
         tag: &Lit,
         generics: &Generics,
@@ -727,6 +751,7 @@ fn try_derive_oneof(
                     make_newtype_variant_get_field_arm(ident, tag, field_name, |f| quote!( { #f } ))
                 }
                 _ => make_variant_get_field_arm_with_fields(
+                    autoproto_path,
                     ident,
                     tag,
                     generics,
@@ -745,6 +770,7 @@ fn try_derive_oneof(
                     make_newtype_variant_get_field_arm(ident, tag, field_name, |f| quote!( ( #f ) ))
                 }
                 _ => make_variant_get_field_arm_with_fields(
+                    autoproto_path,
                     ident,
                     tag,
                     generics,
@@ -758,6 +784,7 @@ fn try_derive_oneof(
     }
 
     fn make_variant_exec_merge_arm_with_fields<F, T, FIter>(
+        autoproto_path: &Path,
         ident: &Ident,
         tag: &Lit,
         generics: &Generics,
@@ -811,7 +838,7 @@ fn try_derive_oneof(
         let ref_mut_construct: Stmt = {
             let construct = names
                 .iter()
-                .map::<Expr, _>(|name| syn::parse_quote!(::autoproto::generic::Wrapper(#name)))
+                .map::<Expr, _>(|name| syn::parse_quote!(#autoproto_path::generic::Wrapper(#name)))
                 .collect::<Punctuated<_, Token!(,)>>();
             syn::parse_quote!(let (#names) = (#construct);)
         };
@@ -829,7 +856,7 @@ fn try_derive_oneof(
         let (dummy_impl_generics, dummy_ty_generics, _) = dummy_generics.split_for_impl();
 
         let where_clause_builder = WhereClauseBuilder::new(&dummy_generics);
-        let clear_where_clause = where_clause_builder.with_bound(quote!(::autoproto::Clear));
+        let clear_where_clause = where_clause_builder.with_bound(quote!(#autoproto_path::Clear));
 
         let deconstruct_dummy = brackets(quote!(#names));
 
@@ -839,17 +866,17 @@ fn try_derive_oneof(
             },
             stmts: names
                 .iter()
-                .map::<Stmt, _>(|name| syn::parse_quote!(::autoproto::Clear::clear(#name);))
+                .map::<Stmt, _>(|name| syn::parse_quote!(#autoproto_path::Clear::clear(#name);))
                 .collect(),
         };
 
         let (dummy_struct_def, dummy_clear_impl): (ItemStruct, ItemImpl) = (
             syn::parse_quote!(
-                #[derive(::autoproto::Proto)]
+                #[derive(#autoproto_path::Proto)]
                 struct #ident #dummy_generics #struct_body #semicolon
             ),
             syn::parse_quote!(
-                impl #dummy_impl_generics ::autoproto::Clear for #ident #dummy_ty_generics
+                impl #dummy_impl_generics #autoproto_path::Clear for #ident #dummy_ty_generics
                 #clear_where_clause
                 {
                     fn clear(&mut self)  {
@@ -929,6 +956,7 @@ fn try_derive_oneof(
     }
 
     fn make_variant_exec_merge_arm(
+        autoproto_path: &Path,
         ident: &Ident,
         tag: &Lit,
         generics: &Generics,
@@ -951,6 +979,7 @@ fn try_derive_oneof(
                     )
                 }
                 _ => make_variant_exec_merge_arm_with_fields(
+                    autoproto_path,
                     ident,
                     tag,
                     generics,
@@ -965,6 +994,7 @@ fn try_derive_oneof(
                 0 => make_unit_variant_exec_merge_arm(tag),
                 1 => make_newtype_variant_exec_merge_arm(ident, tag, None, |f| quote!( ( #f ) )),
                 _ => make_variant_exec_merge_arm_with_fields(
+                    autoproto_path,
                     ident,
                     tag,
                     generics,
@@ -976,6 +1006,10 @@ fn try_derive_oneof(
             Fields::Unit => make_unit_variant_exec_merge_arm(tag),
         }
     }
+
+    let attrs = MessageAttributes::new(attrs)?;
+
+    let autoproto_path = &attrs.autoproto_path;
 
     let mut explicitly_tagged = None::<bool>;
 
@@ -1011,22 +1045,33 @@ fn try_derive_oneof(
     let variant_get_field: Vec<Arm> = variants
         .iter()
         .map::<Arm, _>(|(tag, variant)| {
-            make_variant_get_field_arm(&variant.ident, tag, generics, &variant.fields)
+            make_variant_get_field_arm(
+                autoproto_path,
+                &variant.ident,
+                tag,
+                generics,
+                &variant.fields,
+            )
         })
         .collect();
 
     let variant_exec_merge: Vec<Arm> = variants
         .iter()
         .map::<Arm, _>(|(tag, variant)| {
-            make_variant_exec_merge_arm(&variant.ident, tag, generics, &variant.fields)
+            make_variant_exec_merge_arm(
+                autoproto_path,
+                &variant.ident,
+                tag,
+                generics,
+                &variant.fields,
+            )
         })
         .chain(iter::once(
             syn::parse_quote!(_ => { return ::core::option::Option::<__FuncOut>::None; }),
         ))
         .collect();
 
-    let where_clause_builder = WhereClauseBuilder::with_field_types(
-        generics,
+    let where_clause_builder = WhereClauseBuilder::new(generics).with_field_types(
         data.variants
             .iter()
             .filter_map(|v| match &v.fields {
@@ -1059,50 +1104,52 @@ fn try_derive_oneof(
     let message_where_clause = where_clause_builder
         .with_field_bound(quote!(::core::marker::Send + ::core::marker::Sync))
         .with_self_bound(quote!(
-            ::autoproto::ProtoOneof
-                + ::autoproto::Clear
+            #autoproto_path::ProtoOneof
+                + #autoproto_path::Clear
                 + ::core::fmt::Debug
                 + ::core::marker::Send
                 + ::core::marker::Sync
         ));
     let message_impl = impl_message_for_protooneof(
+        autoproto_path,
         ident,
         &impl_generics,
         &ty_generics,
         Some(&message_where_clause),
     );
 
-    let protooneof_where_clause = where_clause_builder.with_bound(quote!(
-        ::core::default::Default + ::autoproto::Proto + ::autoproto::Clear
+    let protooneof_where_clause = where_clause_builder.with_field_bound(quote!(
+        ::core::default::Default + #autoproto_path::Proto + #autoproto_path::Clear
     ));
 
     Ok(quote!(
-        impl #impl_generics ::autoproto::ProtoOneof for #ident #ty_generics
+        impl #impl_generics #autoproto_path::ProtoOneof for #ident #ty_generics
         #protooneof_where_clause
         {
             fn variant<__Func, __FuncOut>(&self, __proto_arg_func: __Func) -> __FuncOut
             where
-                __Func: ::core::ops::FnOnce(&(dyn ::autoproto::ProtoEncode + '_), ::core::num::NonZeroU32) -> __FuncOut
+                __Func: ::core::ops::FnOnce(&(dyn #autoproto_path::ProtoEncode + '_), ::core::num::NonZeroU32) -> __FuncOut
             {
                 #get_variant
             }
 
             fn exec_merge<__Func, __FuncOut>(&mut self, tag: ::core::num::NonZeroU32, __proto_arg_func: __Func) -> Option<__FuncOut>
             where
-                __Func: ::core::ops::FnOnce(&mut (dyn ::autoproto::Proto + '_)) -> __FuncOut
+                __Func: ::core::ops::FnOnce(&mut (dyn #autoproto_path::Proto + '_)) -> __FuncOut
             {
                 ::core::option::Option::<__FuncOut>::Some(#exec_merge)
             }
         }
 
-        impl #impl_generics ::autoproto::IsMessage for #ident #ty_generics #protooneof_where_clause {}
+        impl #impl_generics #autoproto_path::IsMessage for #ident #ty_generics #protooneof_where_clause {}
 
         #message_impl
     ))
 }
 
 fn try_derive_protostruct<'a>(
-    fields: impl ExactSizeIterator<Item = &'a Field>,
+    autoproto_path: &Path,
+    fields: impl ExactSizeIterator<Item = &'a Field> + Clone,
     ident: &Ident,
     generics: &Generics,
     mode: DeriveMode,
@@ -1113,7 +1160,8 @@ fn try_derive_protostruct<'a>(
 
     let mut explicitly_tagged = None::<bool>;
 
-    let fields: Result<Vec<(NonZeroU32, Member)>> = fields
+    let members: Result<Vec<(NonZeroU32, Member)>> = fields
+        .clone()
         .enumerate()
         .map(|(i, field)| {
             let attributes = FieldAttributes::new(&field.attrs)?;
@@ -1141,9 +1189,9 @@ fn try_derive_protostruct<'a>(
             ))
         })
         .collect();
-    let fields = fields?;
+    let members = members?;
 
-    let fields_array: Punctuated<_, Token!(,)> = fields
+    let members_array: Punctuated<_, Token!(,)> = members
         .iter()
         .map(|(tag, member)| {
             let tag: Lit = LitInt::new(&tag.get().to_string(), Span::call_site()).into();
@@ -1151,13 +1199,13 @@ fn try_derive_protostruct<'a>(
             quote!(
                 (
                     unsafe { ::core::num::NonZeroU32::new_unchecked(#tag) },
-                    &self.#member as &dyn ::autoproto::ProtoEncode,
+                    &self.#member as &dyn #autoproto_path::ProtoEncode,
                 )
             )
         })
         .collect();
 
-    let get_field_mut: Punctuated<_, Token!(,)> = fields
+    let get_field_mut: Punctuated<_, Token!(,)> = members
         .into_iter()
         .map::<Arm, _>(|(tag, member)| {
             let tag: Lit = LitInt::new(&tag.get().to_string(), Span::call_site()).into();
@@ -1167,39 +1215,40 @@ fn try_derive_protostruct<'a>(
         .chain(iter::once(syn::parse_quote!(_ => { return None; })))
         .collect();
 
-    let where_clause_builder = WhereClauseBuilder::new(generics);
+    let where_clause_builder =
+        WhereClauseBuilder::new(generics).with_field_types(fields.map(|f| &f.ty));
 
     let protostruct_where_clause =
-        where_clause_builder.with_bound(quote!(::autoproto::ProtoEncode));
+        where_clause_builder.with_field_bound(quote!(#autoproto_path::ProtoEncode));
     let protostructmut_where_clause = where_clause_builder
-        .with_bound(quote!(::autoproto::Proto))
-        .with_self_bound(quote!(::autoproto::ProtoStruct));
+        .with_field_bound(quote!(#autoproto_path::Proto))
+        .with_self_bound(quote!(#autoproto_path::ProtoStruct));
 
     let immut: ItemImpl = syn::parse_quote! {
-        impl #impl_generics ::autoproto::ProtoStruct for #ident #ty_generics #protostruct_where_clause {
+        impl #impl_generics #autoproto_path::ProtoStruct for #ident #ty_generics #protostruct_where_clause {
             type Fields<'__field_lifetime>
             where
                 Self: '__field_lifetime
             = [
                 (
                     ::core::num::NonZeroU32,
-                    &'__field_lifetime (dyn ::autoproto::ProtoEncode + '__field_lifetime),
+                    &'__field_lifetime (dyn #autoproto_path::ProtoEncode + '__field_lifetime),
                 );
                 #num_fields
             ];
 
             fn fields(&self) -> Self::Fields<'_> {
-                [#fields_array]
+                [#members_array]
             }
         }
     };
     let mutable: Option<ItemImpl> = match mode {
         DeriveMode::ImmutableOnly => None,
         DeriveMode::ImmutableAndMutable => Some(syn::parse_quote! {
-            impl #impl_generics ::autoproto::ProtoStructMut for #ident #ty_generics
+            impl #impl_generics #autoproto_path::ProtoStructMut for #ident #ty_generics
             #protostructmut_where_clause
             {
-                fn field_mut(&mut self, tag: ::core::num::NonZeroU32) -> Option<&mut dyn ::autoproto::Proto> {
+                fn field_mut(&mut self, tag: ::core::num::NonZeroU32) -> Option<&mut dyn #autoproto_path::Proto> {
                     Some(match ::core::num::NonZeroU32::get(tag) {
                         #get_field_mut
                     })
@@ -1209,7 +1258,7 @@ fn try_derive_protostruct<'a>(
     };
 
     Ok(quote! {
-        impl #impl_generics ::autoproto::IsMessage for #ident #ty_generics #protostruct_where_clause {}
+        impl #impl_generics #autoproto_path::IsMessage for #ident #ty_generics #protostruct_where_clause {}
 
         #immut
 
@@ -1266,6 +1315,7 @@ fn try_derive_proto_for_struct(
 
         let (protoencode_impl, proto_impl) = (
             newtype::protoencode(
+                &attrs.autoproto_path,
                 ident,
                 &field,
                 &impl_generics,
@@ -1273,6 +1323,7 @@ fn try_derive_proto_for_struct(
                 &mut where_clause_builder,
             ),
             newtype::proto(
+                &attrs.autoproto_path,
                 ident,
                 &field,
                 &impl_generics,
@@ -1286,6 +1337,8 @@ fn try_derive_proto_for_struct(
             #proto_impl
         })
     } else {
+        let autoproto_path = &attrs.autoproto_path;
+
         match data {
             DataStruct {
                 fields: Fields::Named(FieldsNamed { named: fields, .. }),
@@ -1300,6 +1353,7 @@ fn try_derive_proto_for_struct(
             } => {
                 if fields.is_empty() {
                     Ok(unit_proto_impl(
+                        autoproto_path,
                         ident,
                         impl_generics,
                         ty_generics,
@@ -1307,6 +1361,7 @@ fn try_derive_proto_for_struct(
                     ))
                 } else {
                     let protostruct_impl = try_derive_protostruct(
+                        autoproto_path,
                         fields.into_iter(),
                         ident,
                         generics,
@@ -1314,6 +1369,7 @@ fn try_derive_proto_for_struct(
                     )?;
 
                     let proto_impl = impl_proto_for_protostruct(
+                        autoproto_path,
                         ident,
                         &impl_generics,
                         &ty_generics,
@@ -1331,6 +1387,7 @@ fn try_derive_proto_for_struct(
                 fields: Fields::Unit,
                 ..
             } => Ok(unit_proto_impl(
+                autoproto_path,
                 ident,
                 impl_generics,
                 ty_generics,
@@ -1349,6 +1406,8 @@ fn try_derive_message_for_struct(
     let attrs = MessageAttributes::new(attrs)?;
 
     let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+
+    let autoproto_path = &attrs.autoproto_path;
 
     if attrs.transparent {
         let inner_field = match data {
@@ -1387,6 +1446,7 @@ fn try_derive_message_for_struct(
 
         let (protoencode_impl, proto_impl, message_impl) = (
             newtype::protoencode(
+                &attrs.autoproto_path,
                 ident,
                 &field,
                 &impl_generics,
@@ -1394,6 +1454,7 @@ fn try_derive_message_for_struct(
                 &mut where_clause_builder,
             ),
             newtype::proto(
+                &attrs.autoproto_path,
                 ident,
                 &field,
                 &impl_generics,
@@ -1401,6 +1462,7 @@ fn try_derive_message_for_struct(
                 &mut where_clause_builder,
             ),
             newtype::message(
+                &attrs.autoproto_path,
                 ident,
                 &field,
                 &impl_generics,
@@ -1429,18 +1491,18 @@ fn try_derive_message_for_struct(
             } => {
                 if fields.is_empty() {
                     Ok(unit_proto_impl(
+                        autoproto_path,
                         ident,
                         impl_generics,
                         ty_generics,
                         where_clause,
                     ))
                 } else {
-                    let where_clause_builder = WhereClauseBuilder::with_field_types(
-                        generics,
-                        fields.iter().map(|f| &f.ty),
-                    );
+                    let where_clause_builder = WhereClauseBuilder::new(generics)
+                        .with_field_types(fields.iter().map(|f| &f.ty));
 
                     let protostruct_impl = try_derive_protostruct(
+                        autoproto_path,
                         fields.into_iter(),
                         ident,
                         generics,
@@ -1450,13 +1512,14 @@ fn try_derive_message_for_struct(
                     let message_where_clause = where_clause_builder
                         .with_field_bound(quote!(::core::marker::Send + ::core::marker::Sync))
                         .with_self_bound(quote!(
-                            ::autoproto::ProtoStructMut
-                                + ::autoproto::Clear
+                            #autoproto_path::ProtoStructMut
+                                + #autoproto_path::Clear
                                 + ::core::fmt::Debug
                                 + ::core::marker::Send
                                 + ::core::marker::Sync
                         ));
                     let message_impl = impl_message_for_protostruct(
+                        autoproto_path,
                         ident,
                         &impl_generics,
                         &ty_generics,
@@ -1474,6 +1537,7 @@ fn try_derive_message_for_struct(
                 fields: Fields::Unit,
                 ..
             } => Ok(unit_proto_impl(
+                autoproto_path,
                 ident,
                 impl_generics,
                 ty_generics,
@@ -1484,101 +1548,109 @@ fn try_derive_message_for_struct(
 }
 
 fn impl_message_for_protooneof(
+    autoproto_path: &Path,
     ident: &Ident,
     impl_generics: &syn::ImplGenerics,
     ty_generics: &syn::TypeGenerics,
     where_clause: Option<&syn::WhereClause>,
 ) -> ItemImpl {
     syn::parse_quote!(
-        impl #impl_generics ::autoproto::prost::Message for #ident #ty_generics #where_clause
+        impl #impl_generics #autoproto_path::prost::Message for #ident #ty_generics #where_clause
         {
             fn encode_raw<__Buffer>(&self, buf: &mut __Buffer)
             where
-                __Buffer: ::autoproto::prost::bytes::BufMut,
+                __Buffer: #autoproto_path::prost::bytes::BufMut,
             {
-                ::autoproto::generic::protooneof::message_encode_raw(self, buf)
+                #autoproto_path::generic::protooneof::message_encode_raw(self, buf)
             }
 
-            fn merge_field<__Buffer: ::autoproto::prost::bytes::Buf>(
+            fn merge_field<__Buffer: #autoproto_path::prost::bytes::Buf>(
                 &mut self,
                 tag: u32,
-                wire_type: ::autoproto::prost::encoding::WireType,
+                wire_type: #autoproto_path::prost::encoding::WireType,
                 buf: &mut __Buffer,
-                ctx: ::autoproto::prost::encoding::DecodeContext,
-            ) -> Result<(), ::autoproto::prost::DecodeError> {
-                ::autoproto::generic::protooneof::message_merge_field(self, tag, wire_type, buf, ctx)
+                ctx: #autoproto_path::prost::encoding::DecodeContext,
+            ) -> Result<(), #autoproto_path::prost::DecodeError> {
+                #autoproto_path::generic::protooneof::message_merge_field(self, tag, wire_type, buf, ctx)
             }
 
             fn encoded_len(&self) -> usize {
-                ::autoproto::generic::protooneof::message_encoded_len(self)
+                #autoproto_path::generic::protooneof::message_encoded_len(self)
             }
 
             fn clear(&mut self) {
-                ::autoproto::generic::clear::message_clear(self)
+                #autoproto_path::generic::clear::message_clear(self)
             }
         }
     )
 }
 
 fn impl_message_for_protostruct(
+    autoproto_path: &Path,
     ident: &Ident,
     impl_generics: &syn::ImplGenerics,
     ty_generics: &syn::TypeGenerics,
     where_clause: Option<&syn::WhereClause>,
 ) -> ItemImpl {
     syn::parse_quote!(
-        impl #impl_generics ::autoproto::prost::Message for #ident #ty_generics #where_clause
+        impl #impl_generics #autoproto_path::prost::Message for #ident #ty_generics #where_clause
         {
             fn encode_raw<__Buffer>(&self, buf: &mut __Buffer)
             where
-                __Buffer: ::autoproto::prost::bytes::BufMut,
+                __Buffer: #autoproto_path::prost::bytes::BufMut,
             {
-                ::autoproto::generic::protostruct::message_encode_raw(self, buf)
+                #autoproto_path::generic::protostruct::message_encode_raw(self, buf)
             }
 
-            fn merge_field<__Buffer: ::autoproto::prost::bytes::Buf>(
+            fn merge_field<__Buffer: #autoproto_path::prost::bytes::Buf>(
                 &mut self,
                 tag: u32,
-                wire_type: ::autoproto::prost::encoding::WireType,
+                wire_type: #autoproto_path::prost::encoding::WireType,
                 buf: &mut __Buffer,
-                ctx: ::autoproto::prost::encoding::DecodeContext,
-            ) -> Result<(), ::autoproto::prost::DecodeError> {
-                ::autoproto::generic::protostruct::message_merge_field(self, tag, wire_type, buf, ctx)
+                ctx: #autoproto_path::prost::encoding::DecodeContext,
+            ) -> Result<(), #autoproto_path::prost::DecodeError> {
+                #autoproto_path::generic::protostruct::message_merge_field(self, tag, wire_type, buf, ctx)
             }
 
             fn encoded_len(&self) -> usize {
-                ::autoproto::generic::protostruct::message_encoded_len(self)
+                #autoproto_path::generic::protostruct::message_encoded_len(self)
             }
 
             fn clear(&mut self) {
-                ::autoproto::generic::clear::message_clear(self)
+                #autoproto_path::generic::clear::message_clear(self)
             }
         }
     )
 }
 
 fn impl_proto_for_protostruct(
+    autoproto_path: &Path,
     ident: &Ident,
     impl_generics: &syn::ImplGenerics,
     ty_generics: &syn::TypeGenerics,
     where_clause_builder: &mut WhereClauseBuilder,
 ) -> TokenStream2 {
-    let protoencode_impl =
-        impl_protoencode_for_protostruct(ident, impl_generics, ty_generics, where_clause_builder);
+    let protoencode_impl = impl_protoencode_for_protostruct(
+        autoproto_path,
+        ident,
+        impl_generics,
+        ty_generics,
+        where_clause_builder,
+    );
     let proto_where_clause = where_clause_builder.build().with_self_bound(quote!(
-        ::autoproto::ProtoStructMut + ::autoproto::ProtoEncode + ::autoproto::Clear
+        #autoproto_path::ProtoStructMut + #autoproto_path::ProtoEncode + #autoproto_path::Clear
     ));
 
     quote!(
-        impl #impl_generics ::autoproto::Proto for #ident #ty_generics #proto_where_clause
+        impl #impl_generics #autoproto_path::Proto for #ident #ty_generics #proto_where_clause
         {
             fn merge_self(
                 &mut self,
-                wire_type: ::autoproto::prost::encoding::WireType,
-                mut buf: &mut dyn ::autoproto::prost::bytes::Buf,
-                ctx: ::autoproto::prost::encoding::DecodeContext,
-            ) -> Result<(), ::autoproto::prost::DecodeError> {
-                ::autoproto::generic::protostruct::proto_merge_self(self, wire_type, &mut buf, ctx)
+                wire_type: #autoproto_path::prost::encoding::WireType,
+                mut buf: &mut dyn #autoproto_path::prost::bytes::Buf,
+                ctx: #autoproto_path::prost::encoding::DecodeContext,
+            ) -> Result<(), #autoproto_path::prost::DecodeError> {
+                #autoproto_path::generic::protostruct::proto_merge_self(self, wire_type, &mut buf, ctx)
             }
         }
 
@@ -1587,79 +1659,81 @@ fn impl_proto_for_protostruct(
 }
 
 fn impl_protoencode_for_protostruct(
+    autoproto_path: &Path,
     ident: &Ident,
     impl_generics: &syn::ImplGenerics,
     ty_generics: &syn::TypeGenerics,
     where_clause_builder: &mut WhereClauseBuilder,
 ) -> ItemImpl {
-    let where_clause = where_clause_builder.with_self_bound(quote!(::autoproto::ProtoStruct));
+    let where_clause = where_clause_builder.with_self_bound(quote!(#autoproto_path::ProtoStruct));
 
     syn::parse_quote!(
-        impl #impl_generics ::autoproto::ProtoEncode for #ident #ty_generics #where_clause
+        impl #impl_generics #autoproto_path::ProtoEncode for #ident #ty_generics #where_clause
         {
-            fn encode_as_field(&self, tag: ::core::num::NonZeroU32, mut buf: &mut dyn ::autoproto::prost::bytes::BufMut) {
-                ::autoproto::generic::protostruct::protoencode_encode_as_field(self, tag, buf)
+            fn encode_as_field(&self, tag: ::core::num::NonZeroU32, mut buf: &mut dyn #autoproto_path::prost::bytes::BufMut) {
+                #autoproto_path::generic::protostruct::protoencode_encode_as_field(self, tag, buf)
             }
 
             fn encoded_len_as_field(&self, tag: ::core::num::NonZeroU32) -> usize {
-                ::autoproto::generic::protostruct::protoencode_encoded_len_as_field(self, tag)
+                #autoproto_path::generic::protostruct::protoencode_encoded_len_as_field(self, tag)
             }
         }
     )
 }
 
 fn unit_proto_impl(
+    autoproto_path: &Path,
     ident: &Ident,
     impl_generics: syn::ImplGenerics,
     ty_generics: syn::TypeGenerics,
     where_clause: Option<&syn::WhereClause>,
 ) -> TokenStream2 {
     quote!(
-        impl #impl_generics ::autoproto::ProtoEncode for #ident #ty_generics #where_clause {
+        impl #impl_generics #autoproto_path::ProtoEncode for #ident #ty_generics #where_clause {
             fn encode_as_field(&self, tag: ::core::num::NonZeroU32, buf: &mut dyn prost::bytes::BufMut) {
-                <() as ::autoproto::ProtoEncode>::encode_as_field(&(), tag, buf)
+                <() as #autoproto_path::ProtoEncode>::encode_as_field(&(), tag, buf)
             }
 
             fn encoded_len_as_field(&self, tag: ::core::num::NonZeroU32) -> usize {
-                <() as ::autoproto::ProtoEncode>::encoded_len_as_field(&(), tag)
+                <() as #autoproto_path::ProtoEncode>::encoded_len_as_field(&(), tag)
             }
         }
 
-        impl #impl_generics ::autoproto::Proto for #ident #ty_generics #where_clause {
+        impl #impl_generics #autoproto_path::Proto for #ident #ty_generics #where_clause {
             fn merge_self(
                 &mut self,
-                wire_type: ::autoproto::prost::encoding::WireType,
-                buf: &mut dyn ::autoproto::prost::bytes::Buf,
-                ctx: ::autoproto::prost::encoding::DecodeContext,
-            ) -> Result<(), ::autoproto::prost::DecodeError> {
-                <() as ::autoproto::Proto>::merge_self(&mut (), wire_type, buf, ctx)
+                wire_type: #autoproto_path::prost::encoding::WireType,
+                buf: &mut dyn #autoproto_path::prost::bytes::Buf,
+                ctx: #autoproto_path::prost::encoding::DecodeContext,
+            ) -> Result<(), #autoproto_path::prost::DecodeError> {
+                <() as #autoproto_path::Proto>::merge_self(&mut (), wire_type, buf, ctx)
             }
         }
 
-        impl #impl_generics ::autoproto::prost::Message for #ident #ty_generics #where_clause {
+        impl #impl_generics #autoproto_path::prost::Message for #ident #ty_generics #where_clause {
             fn encode_raw<__Buffer>(&self, buf: &mut __Buffer)
             where
                 __Buffer: prost::bytes::BufMut,
             {
-                <() as ::autoproto::prost::Message>::encode_raw(&(), buf)
+                <() as #autoproto_path::prost::Message>::encode_raw(&(), buf)
             }
 
             fn merge_field<__Buffer: prost::bytes::Buf>(
                 &mut self,
                 tag: u32,
-                wire_type: ::autoproto::prost::encoding::WireType,
+                wire_type: #autoproto_path::prost::encoding::WireType,
                 buf: &mut __Buffer,
-                ctx: ::autoproto::prost::encoding::DecodeContext,
-            ) -> Result<(), ::autoproto::prost::DecodeError> {
-                <() as ::autoproto::prost::Message>::merge_field(&mut (), tag, wire_type, buf, ctx)
+                ctx: #autoproto_path::prost::encoding::DecodeContext,
+            ) -> Result<(), #autoproto_path::prost::DecodeError> {
+                <() as #autoproto_path::prost::Message>::merge_field(&mut (), tag, wire_type, buf, ctx)
             }
 
             fn encoded_len(&self) -> usize {
-                <() as ::autoproto::prost::Message>::encoded_len(&())
+                <() as #autoproto_path::prost::Message>::encoded_len(&())
             }
 
             fn clear(&mut self) {
-                <() as ::autoproto::prost::Message>::clear(&mut ())
+                <() as #autoproto_path::prost::Message>::clear(&mut ())
             }
         }
     )

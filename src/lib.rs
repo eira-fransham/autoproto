@@ -18,6 +18,7 @@ use std::{
     hash::Hash,
     marker::PhantomData,
     num::NonZeroU32,
+    ops::{RangeBounds, RangeInclusive},
 };
 
 pub trait Clear {
@@ -242,6 +243,23 @@ where
     }
 }
 
+#[derive(ProtoEncode)]
+#[autoproto(path(crate))]
+struct RangeInclusiveShim<'a, T>(&'a T, &'a T);
+
+impl<T> ProtoEncode for RangeInclusive<T>
+where
+    for<'a> &'a T: ProtoEncode,
+{
+    fn encode_as_field(&self, tag: NonZeroU32, buf: &mut dyn bytes::BufMut) {
+        RangeInclusiveShim(self.start(), self.end()).encode_as_field(tag, buf)
+    }
+
+    fn encoded_len_as_field(&self, tag: NonZeroU32) -> usize {
+        RangeInclusiveShim(self.start(), self.end()).encoded_len_as_field(tag)
+    }
+}
+
 impl<T> IsDefault for Option<T> {
     fn is_default(&self) -> bool {
         self.is_none()
@@ -384,14 +402,14 @@ pub enum Value {
 }
 
 impl Value {
-    fn float(self) -> Option<f64> {
+    pub fn float(self) -> Option<f64> {
         match self {
             Self::Int(_) => None,
             Self::Float(f) => Some(f),
         }
     }
 
-    fn bool(self) -> Option<bool> {
+    pub fn bool(self) -> Option<bool> {
         self.int::<u8>().and_then(|i| match i {
             0 => Some(false),
             1 => Some(true),
@@ -399,7 +417,7 @@ impl Value {
         })
     }
 
-    fn int<T: TryFrom<i128>>(self) -> Option<T> {
+    pub fn int<T: TryFrom<i128>>(self) -> Option<T> {
         match self {
             Self::Int(i) => i.try_into().ok(),
             Self::Float(_) => None,
