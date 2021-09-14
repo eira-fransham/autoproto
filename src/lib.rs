@@ -14,11 +14,13 @@ use std::{
     borrow::Borrow,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     convert::{TryFrom, TryInto},
+    ffi::{OsStr, OsString},
     fmt::{self, Debug},
     hash::Hash,
     marker::PhantomData,
     num::NonZeroU32,
-    ops::{RangeBounds, RangeInclusive},
+    ops::{Range, RangeInclusive},
+    path::{Path, PathBuf},
 };
 
 pub trait Clear {
@@ -245,18 +247,103 @@ where
 
 #[derive(ProtoEncode)]
 #[autoproto(path(crate))]
-struct RangeInclusiveShim<'a, T>(&'a T, &'a T);
+struct RangeShim<'a, T>(generic::Wrapper<&'a T>, generic::Wrapper<&'a T>);
 
 impl<T> ProtoEncode for RangeInclusive<T>
 where
-    for<'a> &'a T: ProtoEncode,
+    for<'a> generic::Wrapper<&'a T>: ProtoEncode,
 {
     fn encode_as_field(&self, tag: NonZeroU32, buf: &mut dyn bytes::BufMut) {
-        RangeInclusiveShim(self.start(), self.end()).encode_as_field(tag, buf)
+        RangeShim(generic::Wrapper(self.start()), generic::Wrapper(self.end()))
+            .encode_as_field(tag, buf)
     }
 
     fn encoded_len_as_field(&self, tag: NonZeroU32) -> usize {
-        RangeInclusiveShim(self.start(), self.end()).encoded_len_as_field(tag)
+        RangeShim(generic::Wrapper(self.start()), generic::Wrapper(self.end()))
+            .encoded_len_as_field(tag)
+    }
+}
+
+impl<T> ProtoEncode for Range<T>
+where
+    for<'a> generic::Wrapper<&'a T>: ProtoEncode,
+{
+    fn encode_as_field(&self, tag: NonZeroU32, buf: &mut dyn bytes::BufMut) {
+        RangeShim(generic::Wrapper(&self.start), generic::Wrapper(&self.end))
+            .encode_as_field(tag, buf)
+    }
+
+    fn encoded_len_as_field(&self, tag: NonZeroU32) -> usize {
+        RangeShim(generic::Wrapper(&self.start), generic::Wrapper(&self.end))
+            .encoded_len_as_field(tag)
+    }
+}
+
+#[derive(Proto)]
+#[autoproto(path(crate))]
+struct RangeShimMut<'a, T>(generic::Wrapper<&'a mut T>, generic::Wrapper<&'a mut T>);
+
+impl<'a, T> Clear for RangeShimMut<'a, T>
+where
+    T: Clear,
+{
+    fn clear(&mut self) {
+        let RangeShimMut(start, end) = self;
+
+        start.clear();
+        end.clear();
+    }
+}
+
+impl<T> Proto for RangeInclusive<T>
+where
+    for<'a> generic::Wrapper<&'a mut T>: Proto,
+    T: Clear,
+    Self: Clone + ProtoEncode,
+{
+    fn merge_self(
+        &mut self,
+        wire_type: WireType,
+        buf: &mut dyn bytes::Buf,
+        ctx: DecodeContext,
+    ) -> Result<(), prost::DecodeError> {
+        let (mut start, mut end) = self.clone().into_inner();
+
+        Proto::merge_self(
+            &mut RangeShimMut(generic::Wrapper(&mut start), generic::Wrapper(&mut end)),
+            wire_type,
+            buf,
+            ctx,
+        )?;
+
+        *self = start..=end;
+
+        Ok(())
+    }
+}
+
+impl<T> Proto for Range<T>
+where
+    for<'a> generic::Wrapper<&'a mut T>: Proto,
+    T: Clear,
+    Self: ProtoEncode,
+{
+    fn merge_self(
+        &mut self,
+        wire_type: WireType,
+        buf: &mut dyn bytes::Buf,
+        ctx: DecodeContext,
+    ) -> Result<(), prost::DecodeError> {
+        let Range { start, end } = self;
+
+        Proto::merge_self(
+            &mut RangeShimMut(generic::Wrapper(start), generic::Wrapper(end)),
+            wire_type,
+            buf,
+            ctx,
+        )?;
+
+        Ok(())
     }
 }
 
@@ -1038,10 +1125,32 @@ impl_proto_for_protorepeated!(
         T: 'static
 );
 
+#[cfg(feature = "arrayvec")]
+impl_proto_for_protorepeated!(
+    impl<T; const SIZE: usize> Proto for arrayvec::ArrayVec<T, SIZE>
+    where
+        T: ProtoMergeRepeated,
+    where
+        T: 'static
+);
+
+#[cfg(feature = "beef")]
+impl_proto_for_protorepeated!(
+    impl<T, U> Proto for beef::generic::Cow<'_, [T], U>
+    where
+        T: Clone,
+        T: ProtoMergeRepeated,
+        U: beef::traits::Capacity,
+    where
+        T: 'static
+);
+
 impl_proto_for_bytes!(impl<;const LEN: usize> Proto for [u8; LEN]);
 impl_proto_for_bytes!(impl Proto for [u8]);
 impl_proto_for_bytes!(impl Proto for Box<[u8]>);
 impl_proto_for_bytes!(impl Proto for bytes::BytesMut);
+
+impl<T> IsMessage for Box<T> where T: IsMessage {}
 
 impl ProtoEncode for bytes::Bytes {
     fn encode_as_field(&self, tag: NonZeroU32, mut buf: &mut dyn bytes::BufMut) {
@@ -1075,6 +1184,16 @@ impl Proto for bytes::Bytes {
 }
 
 impl ProtoEncode for String {
+    fn encode_as_field(&self, tag: NonZeroU32, buf: &mut dyn bytes::BufMut) {
+        str::encode_as_field(self, tag, buf)
+    }
+
+    fn encoded_len_as_field(&self, tag: NonZeroU32) -> usize {
+        str::encoded_len_as_field(self, tag)
+    }
+}
+
+impl ProtoEncode for str {
     fn encode_as_field(&self, tag: NonZeroU32, mut buf: &mut dyn bytes::BufMut) {
         prost::encoding::encode_key(tag.get(), WireType::LengthDelimited, &mut buf);
         prost::encoding::encode_varint(self.len() as u64, &mut buf);
@@ -1085,6 +1204,46 @@ impl ProtoEncode for String {
         let len = self.len();
 
         prost::encoding::key_len(tag.get()) + prost::encoding::encoded_len_varint(len as u64) + len
+    }
+}
+
+#[cfg(feature = "beef")]
+impl<U> ProtoEncode for beef::generic::Cow<'_, str, U>
+where
+    U: beef::traits::Capacity,
+{
+    fn encode_as_field(&self, tag: NonZeroU32, buf: &mut dyn bytes::BufMut) {
+        let string: &str = self.as_ref();
+        string.encode_as_field(tag, buf);
+    }
+
+    fn encoded_len_as_field(&self, tag: NonZeroU32) -> usize {
+        let string: &str = self.as_ref();
+        string.encoded_len_as_field(tag)
+    }
+}
+
+#[cfg(feature = "beef")]
+impl<U> Proto for beef::generic::Cow<'_, str, U>
+where
+    U: beef::traits::Capacity,
+{
+    fn merge_self(
+        &mut self,
+        _wire_type: prost::encoding::WireType,
+        mut buf: &mut dyn prost::bytes::Buf,
+        _ctx: prost::encoding::DecodeContext,
+    ) -> Result<(), prost::DecodeError> {
+        let len = prost::encoding::decode_varint(&mut buf)? as usize;
+        // There is currently no good way to extend a string from a UTF8 byte iterator,
+        // so we must allocate.
+        let bytes = buf.copy_to_bytes(len);
+        let validated =
+            std::str::from_utf8(&bytes).map_err(|e| prost::DecodeError::new(e.to_string()))?;
+
+        self.push_str(validated);
+
+        Ok(())
     }
 }
 
@@ -1110,7 +1269,118 @@ impl Proto for String {
 
 impl IsDefault for String {
     fn is_default(&self) -> bool {
-        <Self as ::core::convert::AsRef<[u8]>>::as_ref(self).is_empty()
+        self.is_empty()
+    }
+}
+
+impl ProtoEncode for OsStr {
+    #[cfg(unix)]
+    fn encode_as_field(&self, tag: NonZeroU32, buf: &mut dyn bytes::BufMut) {
+        use std::os::unix::ffi::OsStrExt;
+
+        self.as_bytes().encode_as_field(tag, buf)
+    }
+
+    #[cfg(not(unix))]
+    fn encode_as_field(&self, tag: NonZeroU32, buf: &mut dyn bytes::BufMut) {
+        todo!()
+    }
+
+    #[cfg(unix)]
+    fn encoded_len_as_field(&self, tag: NonZeroU32) -> usize {
+        use std::os::unix::ffi::OsStrExt;
+
+        self.as_bytes().encoded_len_as_field(tag)
+    }
+
+    #[cfg(not(unix))]
+    fn encoded_len_as_field(&self, tag: NonZeroU32) -> usize {
+        todo!()
+    }
+}
+
+impl ProtoEncode for OsString {
+    fn encode_as_field(&self, tag: NonZeroU32, buf: &mut dyn bytes::BufMut) {
+        OsStr::encode_as_field(self, tag, buf)
+    }
+
+    fn encoded_len_as_field(&self, tag: NonZeroU32) -> usize {
+        OsStr::encoded_len_as_field(self, tag)
+    }
+}
+
+impl Proto for OsString {
+    #[cfg(unix)]
+    fn merge_self(
+        &mut self,
+        wire_type: WireType,
+        buf: &mut dyn bytes::Buf,
+        ctx: DecodeContext,
+    ) -> Result<(), prost::DecodeError> {
+        use std::os::unix::ffi::OsStrExt;
+
+        let mut bytes = self.as_bytes().to_owned();
+
+        bytes.merge_self(wire_type, buf, ctx)?;
+
+        *self = OsStr::from_bytes(&bytes).to_owned();
+
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    fn merge_self(
+        &mut self,
+        wire_type: WireType,
+        buf: &mut dyn bytes::Buf,
+        ctx: DecodeContext,
+    ) -> Result<(), prost::DecodeError> {
+        use std::os::unix::ffi::OsStrExt;
+
+        let mut bytes = self.as_bytes().clone();
+
+        bytes.merge_self(wire_type, buf, ctx)?;
+
+        *self = Self::from_bytes(bytes);
+
+        Ok(())
+    }
+}
+
+impl ProtoEncode for Path {
+    fn encode_as_field(&self, tag: NonZeroU32, buf: &mut dyn bytes::BufMut) {
+        self.as_os_str().encode_as_field(tag, buf)
+    }
+
+    fn encoded_len_as_field(&self, tag: NonZeroU32) -> usize {
+        self.as_os_str().encoded_len_as_field(tag)
+    }
+}
+
+impl ProtoEncode for PathBuf {
+    fn encode_as_field(&self, tag: NonZeroU32, buf: &mut dyn bytes::BufMut) {
+        Path::encode_as_field(self, tag, buf)
+    }
+
+    fn encoded_len_as_field(&self, tag: NonZeroU32) -> usize {
+        Path::encoded_len_as_field(self, tag)
+    }
+}
+
+impl Proto for PathBuf {
+    fn merge_self(
+        &mut self,
+        wire_type: WireType,
+        buf: &mut dyn bytes::Buf,
+        ctx: DecodeContext,
+    ) -> Result<(), prost::DecodeError> {
+        let mut bytes = self.as_os_str().to_owned();
+
+        bytes.merge_self(wire_type, buf, ctx)?;
+
+        *self = bytes.into();
+
+        Ok(())
     }
 }
 
@@ -1150,12 +1420,3 @@ mod uuid_impl {
         }
     }
 }
-
-#[cfg(feature = "arrayvec")]
-impl_proto_for_protorepeated!(
-    impl<T; const SIZE: usize> Proto for arrayvec::ArrayVec<T, SIZE>
-    where
-        T: ProtoMergeRepeated,
-    where
-        T: 'static
-);

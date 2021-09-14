@@ -1690,7 +1690,7 @@ fn unit_proto_impl(
 ) -> TokenStream2 {
     quote!(
         impl #impl_generics #autoproto_path::ProtoEncode for #ident #ty_generics #where_clause {
-            fn encode_as_field(&self, tag: ::core::num::NonZeroU32, buf: &mut dyn prost::bytes::BufMut) {
+            fn encode_as_field(&self, tag: ::core::num::NonZeroU32, buf: &mut dyn #autoproto_path::prost::bytes::BufMut) {
                 <() as #autoproto_path::ProtoEncode>::encode_as_field(&(), tag, buf)
             }
 
@@ -1713,12 +1713,12 @@ fn unit_proto_impl(
         impl #impl_generics #autoproto_path::prost::Message for #ident #ty_generics #where_clause {
             fn encode_raw<__Buffer>(&self, buf: &mut __Buffer)
             where
-                __Buffer: prost::bytes::BufMut,
+                __Buffer: #autoproto_path::prost::bytes::BufMut,
             {
                 <() as #autoproto_path::prost::Message>::encode_raw(&(), buf)
             }
 
-            fn merge_field<__Buffer: prost::bytes::Buf>(
+            fn merge_field<__Buffer: #autoproto_path::prost::bytes::Buf>(
                 &mut self,
                 tag: u32,
                 wire_type: #autoproto_path::prost::encoding::WireType,

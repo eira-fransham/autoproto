@@ -99,6 +99,25 @@ pub mod protostruct {
     };
     use std::num::NonZeroU32;
 
+    pub fn message_encode_to_vec<T: ProtoStruct>(this: &T) -> Vec<u8> {
+        let mut out = Vec::with_capacity(message_encoded_len(this));
+        message_encode_raw(this, &mut out);
+
+        out
+    }
+
+    pub fn message_merge<T: ProtoStructMut, B: Buf>(
+        this: &mut T,
+        mut buf: B,
+    ) -> Result<(), DecodeError> {
+        let ctx = DecodeContext::default();
+        while buf.has_remaining() {
+            let (tag, wire_type) = prost::encoding::decode_key(&mut buf)?;
+            message_merge_field(this, tag, wire_type, &mut buf, ctx.clone())?;
+        }
+        Ok(())
+    }
+
     pub fn message_encode_raw<T: ProtoStruct, B: BufMut>(this: &T, buf: &mut B) {
         for (tag, field) in this.fields() {
             field.encode_as_field(tag, buf)
